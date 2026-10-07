@@ -26,8 +26,8 @@ CREATE TABLE TR_EXERCICIO (
     NOME          VARCHAR2(100 CHAR) NOT NULL,
     GRUPAMENTO    VARCHAR2(50 CHAR)  NOT NULL,
     FORMA_CARGA   VARCHAR2(8 CHAR)   NOT NULL,
-    REPS_MIN      NUMBER(3)          NOT NULL,
-    REPS_MAX      NUMBER(3)          NOT NULL,
+    REPS_MIN      NUMBER(3),
+    REPS_MAX      NUMBER(3),
 
     -- Regra: cada exercício é identificado por um id gerado pelo banco.
     CONSTRAINT PK_TR_EXERCICIO PRIMARY KEY (ID_EXERCICIO),
@@ -42,7 +42,14 @@ CREATE TABLE TR_EXERCICIO (
     CONSTRAINT CK_TR_EXERCICIO_REPS_MIN CHECK (REPS_MIN >= 1),
 
     -- Regra: faixa alvo coerente (mínimo não passa do máximo).
-    CONSTRAINT CK_TR_EXERCICIO_REPS_MAX CHECK (REPS_MIN <= REPS_MAX)
+    CONSTRAINT CK_TR_EXERCICIO_REPS_MAX CHECK (REPS_MIN <= REPS_MAX),
+
+    -- Regra: faixa alvo é opcional (ao trocar de treino, o usuário não é obrigado
+    -- a inventar meta), mas vem inteira: as duas preenchidas ou as duas nulas.
+    CONSTRAINT CK_TR_EXERCICIO_FAIXA CHECK (
+        (REPS_MIN IS NULL AND REPS_MAX IS NULL)
+        OR (REPS_MIN IS NOT NULL AND REPS_MAX IS NOT NULL)
+    )
 );
 
 

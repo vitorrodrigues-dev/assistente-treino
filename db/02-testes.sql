@@ -1,7 +1,7 @@
 -- =============================================================================
 -- Testes das regras do MVP (rodar DEPOIS do 01-ddl.sql, como script: F5).
 -- Derivados das REGRAS do escopo-mvp.md.
--- Esperado: 6 erros (testes R1-R6) e 2 sucessos (testes P1-P2).
+-- Esperado: 7 erros (testes R1-R7) e 3 sucessos (testes P1-P3).
 -- O arquivo termina com ROLLBACK: nada fica gravado no banco.
 -- Valores de teste usam ID_TELEGRAM 999000xxx e nomes "TESTE ..." para não
 -- colidir com dados reais.
@@ -95,6 +95,16 @@ VALUES ((SELECT ID_MENSAGEM FROM TR_MENSAGEM WHERE ID_TELEGRAM = 999000001),
 
 
 -- -----------------------------------------------------------------------------
+-- R7. Regra: faixa alvo é opcional, mas vem inteira (as duas ou nenhuma).
+-- Só o mínimo preenchido. (CK_TR_EXERCICIO_REPS_MAX não reprova: 8 <= NULL
+-- dá "desconhecido"; quem pega este caso é a CK_TR_EXERCICIO_FAIXA.)
+-- Esperado: ORA-02290 check constraint (CK_TR_EXERCICIO_FAIXA) violated
+-- -----------------------------------------------------------------------------
+INSERT INTO TR_EXERCICIO (NOME, GRUPAMENTO, FORMA_CARGA, REPS_MIN, REPS_MAX)
+VALUES ('TESTE Rosca martelo', 'Bíceps', 'TOTAL', 8, NULL);
+
+
+-- -----------------------------------------------------------------------------
 -- P1. Regras: exercício oficial vazio até confirmar; "não contei" = repetições
 -- NULL; carga não dita = NULL; falha não dita = NULL. Nada vira 0.
 -- Esperado: 1 linha inserida.
@@ -112,6 +122,15 @@ VALUES ((SELECT ID_MENSAGEM FROM TR_MENSAGEM WHERE ID_TELEGRAM = 999000001),
 -- -----------------------------------------------------------------------------
 INSERT INTO TR_SESSAO (DATA_SESSAO, OBSERVACAO)
 VALUES (DATE '2026-10-07', 'segundo treino do dia');
+
+
+-- -----------------------------------------------------------------------------
+-- P3. Regra: faixa alvo é opcional (troca de treino sem meta definida).
+-- Exercício com as duas faixas nulas.
+-- Esperado: 1 linha inserida.
+-- -----------------------------------------------------------------------------
+INSERT INTO TR_EXERCICIO (NOME, GRUPAMENTO, FORMA_CARGA, REPS_MIN, REPS_MAX)
+VALUES ('TESTE Remada curvada', 'Costas', 'TOTAL', NULL, NULL);
 
 
 -- -----------------------------------------------------------------------------
