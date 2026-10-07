@@ -1,0 +1,22 @@
+# Saída de build do Maven
+target/
+
+# Saída de build da IDE (IntelliJ/javac manual)
+out/
+
+# IntelliJ IDEA
+.idea/
+*.iml
+
+# VS Code
+.vscode/
+
+# Variáveis de ambiente locais (ex.: TELEGRAM_BOT_TOKEN) — nunca versionar
+.env
+
+# Logs
+*.log
+
+# Arquivos do sistema operacional
+Thumbs.db
+.DS_Store
