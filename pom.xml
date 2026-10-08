@@ -20,5 +20,10 @@
             <artifactId>jackson-databind</artifactId>
             <version>3.2.3</version>
         </dependency>
+        <dependency>
+            <groupId>com.oracle.database.jdbc</groupId>
+            <artifactId>ojdbc17</artifactId>
+            <version>23.26.3.0.0</version>
+        </dependency>
     </dependencies>
 </project>
