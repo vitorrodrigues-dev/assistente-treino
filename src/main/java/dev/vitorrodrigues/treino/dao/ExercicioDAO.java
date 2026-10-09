@@ -59,6 +59,7 @@ public class ExercicioDAO {
                     ExercicioComApelidos exercicio = exerciciosPorId.get(idExercicio);
                     if (exercicio == null) {
                         exercicio = new ExercicioComApelidos(
+                                idExercicio,
                                 rs.getString("NOME"),
                                 rs.getString("GRUPAMENTO"),
                                 rs.getString("FORMA_CARGA"),

@@ -30,6 +30,25 @@ public class SessaoDAO {
             VALUES (?, ?, ?)
             """;
 
+    // Por que o CASE e não só OBSERVACAO || CHR(10) || ?: no Oracle, concatenar
+    // com NULL trata o NULL como texto vazio. Sem o CASE, a primeira observação
+    // de uma sessão que não tinha nenhuma seria gravada começando com uma quebra
+    // de linha. CHR(10) = '\n'.
+    // A soma das duas observações pode passar de 1000 caracteres: aí o Oracle
+    // recusa (ORA-12899) e o DAO não corta texto do usuário (mesma regra do
+    // SerieDAO).
+    // ID_USUARIO no WHERE: mesma ideia do vincularSessao, ninguém acrescenta
+    // texto na sessão de outro usuário.
+    private static final String SQL_ACRESCENTAR_OBSERVACAO = """
+            UPDATE TR_SESSAO
+               SET OBSERVACAO = CASE
+                                  WHEN OBSERVACAO IS NULL THEN ?
+                                  ELSE OBSERVACAO || CHR(10) || ?
+                                END
+             WHERE ID_SESSAO = ?
+               AND ID_USUARIO = ?
+            """;
+
     /**
      * Sessão do usuário naquela data. Vazio = ainda não treinou (registrou) nesse dia.
      */
@@ -65,6 +84,39 @@ public class SessaoDAO {
             ps.executeUpdate();
 
             return JdbcUtil.lerIdGerado(ps);
+        }
+    }
+
+    /**
+     * Junta a observação de mais uma mensagem do mesmo dia à da sessão:
+     * se a sessão não tinha observação, grava esta; se tinha, acrescenta numa
+     * linha nova. Nada é apagado: as duas mensagens podem trazer contexto.
+     *
+     * @param observacao texto a acrescentar; não pode ser null (sem observação,
+     *        o service nem chama este método)
+     * @throws IllegalStateException se nada foi atualizado: a sessão não existe
+     *         ou não é do usuário
+     */
+    public void acrescentarObservacao(Connection conn, long idSessao, long idUsuario, String observacao)
+            throws SQLException {
+        // Com null, o ELSE do CASE gravaria a observação antiga + uma quebra de
+        // linha solta no fim. Falha alto em vez de sujar o texto.
+        if (observacao == null) {
+            throw new IllegalArgumentException("Observação null: não há o que acrescentar.");
+        }
+        try (PreparedStatement ps = conn.prepareStatement(SQL_ACRESCENTAR_OBSERVACAO)) {
+            // O mesmo texto vai nos dois "?" do CASE.
+            ps.setString(1, observacao);
+            ps.setString(2, observacao);
+            ps.setLong(3, idSessao);
+            ps.setLong(4, idUsuario);
+
+            int linhas = ps.executeUpdate();
+            if (linhas == 0) {
+                // Só ids internos na mensagem, como no vincularSessao.
+                throw new IllegalStateException("Sessão " + idSessao + " não pertence ao usuário "
+                        + idUsuario + ".");
+            }
         }
     }
 }

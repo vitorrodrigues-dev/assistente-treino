@@ -20,7 +20,7 @@ import tools.jackson.databind.node.ObjectNode;
 /**
  * Relato em texto -> prompt v3 -> API da Anthropic -> RelatoExtraido.
  */
-public class ExtratorCliente {
+public class ExtratorCliente implements Extrator {
 
     private static final URI URI_MESSAGES = URI.create("https://api.anthropic.com/v1/messages");
     private static final String VERSAO_API = "2023-06-01";
@@ -104,6 +104,7 @@ public class ExtratorCliente {
      * @param dataHoje   data de envio da mensagem, já no fuso do usuário
      * @param exercicios catálogo com os apelidos do usuário (ExercicioDAO.listarComApelidos)
      */
+    @Override
     public RelatoExtraido extrair(String relato, LocalDate dataHoje, List<ExercicioComApelidos> exercicios)
             throws IOException, InterruptedException, ExtracaoException {
         String prompt = montarPrompt(relato, dataHoje, exercicios);

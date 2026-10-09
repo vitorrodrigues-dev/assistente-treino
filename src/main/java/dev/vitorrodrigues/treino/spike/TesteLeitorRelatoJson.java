@@ -176,8 +176,8 @@ public class TesteLeitorRelatoJson {
                         && ocorrencias(bloco, "{RELATO}") == 1);
 
         List<ExercicioComApelidos> exercicios = List.of(
-                new ExercicioComApelidos("Crucifixo máquina", "Peito", "TOTAL", null, null, List.of("voador", "peck deck")),
-                new ExercicioComApelidos("Remada unilateral máquina", "Costas", "POR_LADO", 8, 12, List.of()));
+                new ExercicioComApelidos(1L, "Crucifixo máquina", "Peito", "TOTAL", null, null, List.of("voador", "peck deck")),
+                new ExercicioComApelidos(2L, "Remada unilateral máquina", "Costas", "POR_LADO", 8, 12, List.of()));
         String linhasDaLista = "- Crucifixo máquina | grupamento: Peito | carga: total | apelidos: voador, peck deck\n"
                 + "- Remada unilateral máquina | grupamento: Costas | carga: por lado | faixa alvo: 8-12";
         String relato = "relato com {DATA_HOJE} e {LISTA_EXERCICIOS} dentro";

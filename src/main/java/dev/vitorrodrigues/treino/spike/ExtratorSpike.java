@@ -146,6 +146,8 @@ public class ExtratorSpike {
 
     private static ExercicioComApelidos exercicio(String grupamento, String nome, String formaCarga,
                                                   String... apelidos) {
-        return new ExercicioComApelidos(nome, grupamento, formaCarga, null, null, List.of(apelidos));
+        // Id fictício (-1 não existe: o IDENTITY começa em 1). A lista não vem do
+        // banco, o id não entra no prompt e este spike não grava nada.
+        return new ExercicioComApelidos(-1L, nome, grupamento, formaCarga, null, null, List.of(apelidos));
     }
 }

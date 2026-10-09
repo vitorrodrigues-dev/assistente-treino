@@ -6,12 +6,19 @@ import java.util.List;
  * Exercício do catálogo junto com os apelidos de UM usuário.
  * É o que vai para a lista de exercícios do prompt do extrator.
  *
+ * idExercicio (fatia 5): o ID_EXERCICIO do catálogo. O modelo devolve o NOME
+ * oficial; é com este id que o RegistroService transforma o nome em
+ * TR_SERIE.ID_EXERCICIO, sem uma segunda consulta ao banco. Fica FORA do prompt
+ * (linhaDoPrompt não usa): o modelo não precisa dele, e o prompt enviado tem que
+ * continuar idêntico ao do docs/prompt-extrator.md.
+ *
  * repsMin/repsMax são Integer (não int) porque a faixa alvo é opcional:
  * null = sem faixa, nunca 0.
  * apelidos nunca é null: sem apelido = lista vazia. O DAO preenche essa lista
  * enquanto lê as linhas da consulta.
  */
 public record ExercicioComApelidos(
+        long idExercicio,
         String nome,
         String grupamento,
         String formaCarga,
