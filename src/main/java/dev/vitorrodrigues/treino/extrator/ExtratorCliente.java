@@ -25,8 +25,17 @@ public class ExtratorCliente {
     private static final URI URI_MESSAGES = URI.create("https://api.anthropic.com/v1/messages");
     private static final String VERSAO_API = "2023-06-01";
 
-    // Alias do Haiku 4.5 (modelo testado no spike do prompt v3).
-    private static final String MODELO = "claude-haiku-4-5";
+    // Haiku 4.5 pelo id com data (snapshot fixo). O alias "claude-haiku-4-5" aponta
+    // para o snapshot mais recente e pode mudar sem aviso; com o id fixo, a
+    // regressão do prompt v3 roda sempre contra o mesmo modelo.
+    // Mudou aqui = rodar a regressão de novo (os 3 casos do ExtratorSpike).
+    private static final String MODELO = "claude-haiku-4-5-20251001";
+
+    // 0 = o mínimo de aleatoriedade na escolha das palavras: o mesmo relato tende a
+    // gerar o mesmo JSON. Tende, não garante: a própria Anthropic avisa que
+    // temperature 0 não dá respostas 100% idênticas. A rede de segurança continua
+    // sendo a confirmação no chat e o texto bruto salvo.
+    private static final double TEMPERATURA = 0.0;
 
     // Teto de tokens da RESPOSTA (não do prompt). Um treino inteiro em JSON fica
     // bem abaixo disso. Se estourar, a resposta vem cortada (stop_reason
@@ -40,7 +49,9 @@ public class ExtratorCliente {
     // Prompt v3, copiado sem alteração de docs/prompt-extrator.md.
     // Mudou aqui = nova versão do prompt: rodar a regressão (os 3 casos do
     // ExtratorSpike) e registrar no docs/prompt-extrator.md.
-    private static final String PROMPT_V3 = """
+    // Público para o TesteLeitorRelatoJson (pacote spike) comparar com o doc,
+    // caractere por caractere. Não é segredo: o doc está no repositório.
+    public static final String PROMPT_V3 = """
             Você extrai dados de relatos de treino de musculação.
             Retorne APENAS um JSON válido, sem texto antes ou depois.
 
@@ -101,7 +112,8 @@ public class ExtratorCliente {
     }
 
     // Template fixo + parâmetros: mesma ideia do PreparedStatement.
-    static String montarPrompt(String relato, LocalDate dataHoje, List<ExercicioComApelidos> exercicios) {
+    // Público para o teste offline (pacote spike); não chama a API.
+    public static String montarPrompt(String relato, LocalDate dataHoje, List<ExercicioComApelidos> exercicios) {
         StringBuilder lista = new StringBuilder();
         for (ExercicioComApelidos exercicio : exercicios) {
             if (!lista.isEmpty()) {
@@ -124,6 +136,7 @@ public class ExtratorCliente {
         ObjectNode corpo = mapper.createObjectNode();
         corpo.put("model", MODELO);
         corpo.put("max_tokens", MAX_TOKENS);
+        corpo.put("temperature", TEMPERATURA);
         ArrayNode mensagens = corpo.putArray("messages");
         ObjectNode mensagem = mensagens.addObject();
         mensagem.put("role", "user");

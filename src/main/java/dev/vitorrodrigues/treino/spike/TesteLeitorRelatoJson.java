@@ -1,16 +1,24 @@
 package dev.vitorrodrigues.treino.spike;
 
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.LocalDate;
 import java.util.List;
 
 import dev.vitorrodrigues.treino.extrator.ExtracaoException;
+import dev.vitorrodrigues.treino.extrator.ExtratorCliente;
 import dev.vitorrodrigues.treino.extrator.LeitorRelatoJson;
 import dev.vitorrodrigues.treino.extrator.RelatoExtraido;
 import dev.vitorrodrigues.treino.extrator.SerieExtraida;
+import dev.vitorrodrigues.treino.modelo.ExercicioComApelidos;
 import tools.jackson.databind.ObjectMapper;
 import tools.jackson.databind.node.ObjectNode;
 
 /**
- * Testes offline do LeitorRelatoJson: sem API e sem banco, não custa nada rodar.
+ * Testes offline do extrator: fidelidade do prompt v3 (ExtratorCliente x
+ * docs/prompt-extrator.md) e LeitorRelatoJson. Sem API e sem banco, não custa
+ * nada rodar. Rodar a partir da raiz do projeto (lê o doc do prompt).
  * Conferir a última linha: "RESULTADO: N ok, 0 falhas".
  *
  * "Fulano" marca texto que faz o papel de relato de outra pessoa: nenhuma
@@ -19,6 +27,8 @@ import tools.jackson.databind.node.ObjectNode;
 public class TesteLeitorRelatoJson {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    private static final Path DOC_DO_PROMPT = Path.of("docs", "prompt-extrator.md");
 
     private static final List<String> CAMPOS_OBRIGATORIOS_DA_SERIE = List.of(
             "exercicio_relatado", "numero_serie", "carga_aproximada", "repeticoes_aproximadas");
@@ -107,6 +117,7 @@ public class TesteLeitorRelatoJson {
     private static int falhas = 0;
 
     public static void main(String[] args) {
+        fidelidadeDoPrompt();
         respostaReal();
         cercaAceita();
         bordasDaCerca();
@@ -120,6 +131,102 @@ public class TesteLeitorRelatoJson {
         if (falhas > 0) {
             System.exit(1);
         }
+    }
+
+    // --- Fidelidade do prompt v3 ------------------------------------------------
+
+    // O doc é onde o prompt é versionado e discutido; a constante do Java é o que
+    // vai para a API. Os dois têm que ser iguais caractere por caractere: se um
+    // mudar sozinho, a regressão estaria testando um prompt e o bot usando outro.
+    private static void fidelidadeDoPrompt() {
+        String doc;
+        try {
+            // \r\n -> \n: se o Git do Windows converter o .md para \r\n, muda a
+            // quebra de linha, não o texto. O text block do Java sempre usa \n.
+            doc = Files.readString(DOC_DO_PROMPT).replace("\r\n", "\n");
+        } catch (IOException e) {
+            falhas++;
+            System.out.println("FALHA: não consegui ler " + DOC_DO_PROMPT
+                    + " (rodar a partir da raiz do projeto): " + e.getClass().getSimpleName());
+            return;
+        }
+
+        // Primeiro bloco ``` do doc: da linha seguinte à abertura até a quebra de
+        // linha antes do fechamento (inclusive), igual ao fim do text block do Java.
+        int abertura = doc.indexOf("```\n");
+        int fechamento = abertura < 0 ? -1 : doc.indexOf("\n```", abertura + 4);
+        if (fechamento < 0) {
+            falhas++;
+            System.out.println("FALHA: bloco ``` do prompt não encontrado em " + DOC_DO_PROMPT);
+            return;
+        }
+        int inicioDoBloco = abertura + 4;
+        String bloco = doc.substring(inicioDoBloco, fechamento + 1);
+        int linhaDoBlocoNoDoc = 1 + (int) doc.substring(0, inicioDoBloco).chars().filter(c -> c == '\n').count();
+
+        boolean constanteIgual = ExtratorCliente.PROMPT_V3.equals(bloco);
+        confere("PROMPT_V3 == bloco do doc, caractere por caractere" + (constanteIgual ? ""
+                        : " (1ª diferença: " + primeiraDiferenca(bloco, ExtratorCliente.PROMPT_V3, linhaDoBlocoNoDoc) + ")"),
+                constanteIgual);
+
+        // Os 3 testes que estavam no TesteExtratorOffline (spike da fatia 3).
+        confere("bloco do doc tem {DATA_HOJE}, {LISTA_EXERCICIOS} e {RELATO} 1x cada",
+                ocorrencias(bloco, "{DATA_HOJE}") == 1
+                        && ocorrencias(bloco, "{LISTA_EXERCICIOS}") == 1
+                        && ocorrencias(bloco, "{RELATO}") == 1);
+
+        List<ExercicioComApelidos> exercicios = List.of(
+                new ExercicioComApelidos("Crucifixo máquina", "Peito", "TOTAL", null, null, List.of("voador", "peck deck")),
+                new ExercicioComApelidos("Remada unilateral máquina", "Costas", "POR_LADO", 8, 12, List.of()));
+        String linhasDaLista = "- Crucifixo máquina | grupamento: Peito | carga: total | apelidos: voador, peck deck\n"
+                + "- Remada unilateral máquina | grupamento: Costas | carga: por lado | faixa alvo: 8-12";
+        String relato = "relato com {DATA_HOJE} e {LISTA_EXERCICIOS} dentro";
+
+        String esperado = bloco.replace("{DATA_HOJE}", "08/10/2026")
+                .replace("{LISTA_EXERCICIOS}", linhasDaLista)
+                .replace("{RELATO}", relato);
+        String montado = ExtratorCliente.montarPrompt(relato, LocalDate.of(2026, 10, 8), exercicios);
+        confere("prompt montado == bloco do doc com as trocas", montado.equals(esperado));
+        confere("marcadores dentro do relato ficam literais", montado.endsWith("Relato:\n" + relato + "\n"));
+    }
+
+    private static int ocorrencias(String texto, String trecho) {
+        int total = 0;
+        for (int i = texto.indexOf(trecho); i >= 0; i = texto.indexOf(trecho, i + trecho.length())) {
+            total++;
+        }
+        return total;
+    }
+
+    // "linha L do doc, coluna C: doc tem 'x' (U+0078), Java tem 'y' (U+0079)".
+    // O código U+ mostra diferenças invisíveis: espaço comum x espaço não
+    // separável, acento composto x pré-composto, \n a mais ou a menos.
+    private static String primeiraDiferenca(String doc, String java, int primeiraLinha) {
+        int i = 0;
+        while (i < doc.length() && i < java.length() && doc.charAt(i) == java.charAt(i)) {
+            i++;
+        }
+        int linha = primeiraLinha;
+        int coluna = 1;
+        for (int j = 0; j < i; j++) {
+            if (doc.charAt(j) == '\n') {
+                linha++;
+                coluna = 1;
+            } else {
+                coluna++;
+            }
+        }
+        return "linha " + linha + " do doc, coluna " + coluna
+                + ": doc tem " + descrever(doc, i) + ", Java tem " + descrever(java, i);
+    }
+
+    private static String descrever(String texto, int posicao) {
+        if (posicao >= texto.length()) {
+            return "o fim do texto";
+        }
+        char c = texto.charAt(posicao);
+        String visivel = c == '\n' ? "\\n" : String.valueOf(c);
+        return "'" + visivel + "' (U+" + String.format("%04X", (int) c) + ")";
     }
 
     // --- Resposta real do modelo -------------------------------------------------
