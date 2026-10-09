@@ -20,3 +20,5 @@ out/
 # Arquivos do sistema operacional
 Thumbs.db
 .DS_Store
+
+docs/escopo-mvp.md
