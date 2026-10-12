@@ -14,6 +14,7 @@ import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Deque;
 import java.util.HashMap;
 import java.util.List;
@@ -27,25 +28,29 @@ import dev.vitorrodrigues.treino.bot.LoopTelegram;
 import dev.vitorrodrigues.treino.bot.LoopTelegram.Encerramento;
 import dev.vitorrodrigues.treino.bot.Textos;
 import dev.vitorrodrigues.treino.extrator.SerieExtraida;
+import dev.vitorrodrigues.treino.modelo.ResultadoAprovacao;
 import dev.vitorrodrigues.treino.modelo.ResultadoRegistro;
 import dev.vitorrodrigues.treino.modelo.ResultadoRegistro.SerieGravada;
 import dev.vitorrodrigues.treino.modelo.ResultadoRegistro.TipoFalha;
 import dev.vitorrodrigues.treino.modelo.Usuario;
+import dev.vitorrodrigues.treino.service.Cadastrador;
 import dev.vitorrodrigues.treino.service.Registrador;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 
 /**
- * Aceite da fatia 6a sem celular: o LoopTelegram inteiro, com falsos no lugar do
- * Telegram, do banco, da espera e do relógio. Sem banco, sem API, sem rede: não
- * custa nada rodar.
+ * Aceite das fatias 6a e 6b sem celular: o LoopTelegram inteiro, com falsos no
+ * lugar do Telegram, do banco, da espera e do relógio. Sem banco, sem API, sem
+ * rede: não custa nada rodar.
  *
  * Cada cenário entrega updates em JSON (no formato da Bot API) a um Telegram
- * falso e confere a resposta enviada, o avanço do offset, as esperas pedidas e
- * a linha de log. No fim, confere que NENHUMA linha de log de nenhum cenário
- * contém texto, nome, from.id ou ID_USUARIO dos updates de teste.
+ * falso e confere a resposta enviada (e para qual chat), o avanço do offset, as
+ * esperas pedidas e a linha de log. No fim, confere que NENHUMA linha de log de
+ * nenhum cenário contém texto, nome, from.id, ID_USUARIO ou argumento do
+ * /aprovar dos updates de teste.
  *
- * "Fulano" e "Beltrano" fazem o papel de outras pessoas.
+ * "Fulano", "Beltrano", "Sicrana" e "Deltrano" fazem o papel de outras pessoas;
+ * "Ciclano" é o administrador.
  *
  * Rodar (da raiz do projeto):
  * ./mvnw -q compile exec:java "-Dexec.mainClass=dev.vitorrodrigues.treino.spike.TelegramSpike"
@@ -70,12 +75,36 @@ public class TelegramSpike {
     private static final String NOME_PENDENTE = "Beltrano Pendente";
     private static final long ID_GRUPO = -1001234567L;
 
-    // Tudo o que nunca pode aparecer no log. Os textos das mensagens e as
-    // dúvidas entram aqui conforme os cenários os criam (ver segredo()).
+    // 6b. O administrador (TELEGRAM_CHAT_ID_PERMITIDO), também ATIVO; um
+    // BLOQUEADO; e os ids internos. Todos com vários dígitos, para a conferência
+    // "não aparece no log" valer alguma coisa (um id 3 apareceria em qualquer linha).
+    private static final long ID_TELEGRAM_ADMIN = 712604398L;
+    private static final long ID_USUARIO_ADMIN = 777001L;
+    private static final String NOME_ADMIN = "Ciclano Admin";
+    private static final long ID_TELEGRAM_BLOQUEADO = 695310827L;
+    private static final long ID_USUARIO_BLOQUEADO = 888702L;
+    private static final String NOME_BLOQUEADO = "Deltrano Bloqueado";
+    private static final long ID_USUARIO_PENDENTE = 888456L;
+    // Quem manda /start nos cenários da 6b (o ID_TELEGRAM_DESCONHECIDO).
+    private static final String NOME_NOVO = "Sicrana Nova";
+    // Primeiro ID_USUARIO que o cadastro falso gera (cada cenário começa nele).
+    private static final long PRIMEIRO_ID_GERADO = 905001L;
+    // Não existe em nenhum cenário.
+    private static final long ID_USUARIO_INEXISTENTE = 99999L;
+
+    // Tudo o que nunca pode aparecer no log. Os textos das mensagens, as
+    // dúvidas e os ids gerados entram aqui conforme os cenários os criam (ver
+    // segredo()).
     private static final List<String> PROIBIDOS_NO_LOG = new ArrayList<>(List.of(
-            NOME_ATIVO, NOME_PENDENTE,
+            NOME_ATIVO, NOME_PENDENTE, NOME_ADMIN, NOME_BLOQUEADO, NOME_NOVO,
             String.valueOf(ID_TELEGRAM_ATIVO), String.valueOf(ID_TELEGRAM_PENDENTE),
-            String.valueOf(ID_TELEGRAM_DESCONHECIDO), String.valueOf(ID_USUARIO_ATIVO)));
+            String.valueOf(ID_TELEGRAM_DESCONHECIDO), String.valueOf(ID_TELEGRAM_ADMIN),
+            String.valueOf(ID_TELEGRAM_BLOQUEADO),
+            String.valueOf(ID_USUARIO_ATIVO), String.valueOf(ID_USUARIO_PENDENTE),
+            String.valueOf(ID_USUARIO_ADMIN), String.valueOf(ID_USUARIO_BLOQUEADO),
+            String.valueOf(ID_USUARIO_INEXISTENTE),
+            // Argumento não numérico do /aprovar (os numéricos são os ids acima).
+            "abc"));
 
     // Todas as linhas de log de todos os cenários, para a conferência final.
     private static final List<String> LOG_GERAL = new ArrayList<>();
@@ -92,6 +121,10 @@ public class TelegramSpike {
         errosInesperados();
         getUpdates();
         envio();
+        statusDoRemetente();
+        cadastroPeloStart();
+        aprovar();
+        fluxoCompleto();
         higieneDoLog();
 
         System.out.println();
@@ -136,21 +169,24 @@ public class TelegramSpike {
         conferir("termina sem encerrar o bot", c.rodarAteEsvaziar() == null);
         conferir("offset avançou depois de todos (110)", c.loop.offset() == 110);
         conferir("registrar nunca foi chamado nos filtros", c.registrador.chamadas == 0);
-        conferir("respostas, na ordem: figurinha, branco, edição, comando",
-                c.telegram.enviadas.equals(List.of(Textos.SO_ENTENDO_TEXTO, Textos.SO_ENTENDO_TEXTO,
-                        Textos.EDICAO_IGNORADA, Textos.COMANDO_NAO_RECONHECIDO)));
-        conferir("todas as respostas foram para o chat de quem está ATIVO",
-                c.telegram.destinos.stream().allMatch(id -> id == ID_TELEGRAM_ATIVO));
+        // 6b: o texto do PENDENTE (103) passou a receber "aguardando aprovação".
+        conferir("respostas, na ordem: PENDENTE (6b), figurinha, branco, edição, comando",
+                c.telegram.enviadas.equals(List.of(Textos.AGUARDANDO_APROVACAO, Textos.SO_ENTENDO_TEXTO,
+                        Textos.SO_ENTENDO_TEXTO, Textos.EDICAO_IGNORADA, Textos.COMANDO_NAO_RECONHECIDO)));
+        conferir("a do PENDENTE foi para o chat dele; as outras, para o de quem está ATIVO",
+                c.telegram.destinos.equals(List.of(ID_TELEGRAM_PENDENTE, ID_TELEGRAM_ATIVO, ID_TELEGRAM_ATIVO,
+                        ID_TELEGRAM_ATIVO, ID_TELEGRAM_ATIVO)));
         conferirLinha(c, 100, "| my_chat_member | ignorado: não é mensagem |");
         conferirLinha(c, 101, "| texto | ignorado: não é chat privado |");
         conferirLinha(c, 102, "| texto | ignorado: sem remetente |");
-        conferirLinha(c, 103, "| texto | ignorado: remetente não está ATIVO |");
-        conferirLinha(c, 104, "| texto | ignorado: remetente não está ATIVO |");
-        conferirLinha(c, 105, "| edição | ignorado: remetente não está ATIVO |");
+        // 103 a 105 e 109: linhas da 6b (status do remetente; comando como tipo).
+        conferirLinha(c, 103, "| texto | ignorado: remetente PENDENTE |");
+        conferirLinha(c, 104, "| texto | ignorado: remetente não cadastrado |");
+        conferirLinha(c, 105, "| edição | ignorado: edição de remetente PENDENTE |");
         conferirLinha(c, 106, "| figurinha | ignorado: sem texto |");
         conferirLinha(c, 107, "| texto | ignorado: sem texto |");
         conferirLinha(c, 108, "| edição | ignorado: edição |");
-        conferirLinha(c, 109, "| texto | ignorado: comando não reconhecido |");
+        conferirLinha(c, 109, "| comando | ignorado: comando não reconhecido |");
     }
 
     // --- Seção 1.8: o que chega ao registrar ----------------------------------------------
@@ -522,6 +558,375 @@ public class TelegramSpike {
                 !linha(umaFalha, 820).contains("não enviada"));
     }
 
+    // --- 6b, regra 2: comportamento por status do remetente --------------------------------
+
+    private static void statusDoRemetente() throws InterruptedException {
+        titulo("6b: comportamento por status do remetente (regra 2)");
+
+        // Desconhecido sem /start: silêncio, nada gravado.
+        Cenario desconhecido = new Cenario();
+        desconhecido.telegram.updates.addAll(List.of(
+                texto(1100, ID_TELEGRAM_DESCONHECIDO, NOME_NOVO, "oi, tudo bem? quero testar o bot"),
+                figurinha(1101, ID_TELEGRAM_DESCONHECIDO, NOME_NOVO),
+                edicao(1102, ID_TELEGRAM_DESCONHECIDO, NOME_NOVO, "/start"),
+                texto(1103, ID_TELEGRAM_DESCONHECIDO, NOME_NOVO, "/aprovar " + ID_USUARIO_PENDENTE)));
+        desconhecido.rodarAteEsvaziar();
+        conferir("desconhecido (texto, figurinha, edição de /start, /aprovar): silêncio",
+                desconhecido.telegram.tentativasDeEnvio == 0);
+        conferir("desconhecido: nada cadastrado, registrado nem aprovado; TR_USUARIO não muda",
+                desconhecido.nadaGravado() && desconhecido.status(ID_TELEGRAM_DESCONHECIDO) == null);
+        conferir("desconhecido: avançou depois dos 4 (1104)", desconhecido.loop.offset() == 1104);
+        conferirLinha(desconhecido, 1100, "| texto | ignorado: remetente não cadastrado |");
+        conferirLinha(desconhecido, 1101, "| figurinha | ignorado: remetente não cadastrado |");
+        conferirLinha(desconhecido, 1102, "| edição | ignorado: remetente não cadastrado |");
+        conferirLinha(desconhecido, 1103, "| comando | ignorado: remetente não cadastrado |");
+
+        // BLOQUEADO: silêncio total, inclusive no /start.
+        Cenario bloqueado = new Cenario();
+        bloqueado.telegram.updates.addAll(List.of(
+                texto(1110, ID_TELEGRAM_BLOQUEADO, NOME_BLOQUEADO, "/start"),
+                texto(1111, ID_TELEGRAM_BLOQUEADO, NOME_BLOQUEADO, "supino 3x10 do Deltrano bloqueado"),
+                figurinha(1112, ID_TELEGRAM_BLOQUEADO, NOME_BLOQUEADO),
+                edicao(1113, ID_TELEGRAM_BLOQUEADO, NOME_BLOQUEADO, "supino corrigido do Deltrano"),
+                texto(1114, ID_TELEGRAM_BLOQUEADO, NOME_BLOQUEADO, "/aprovar " + ID_USUARIO_BLOQUEADO)));
+        bloqueado.rodarAteEsvaziar();
+        conferir("BLOQUEADO (/start, texto, figurinha, edição, /aprovar): silêncio total",
+                bloqueado.telegram.tentativasDeEnvio == 0);
+        conferir("BLOQUEADO: nada cadastrado, registrado nem aprovado; continua BLOQUEADO",
+                bloqueado.nadaGravado() && "BLOQUEADO".equals(bloqueado.status(ID_TELEGRAM_BLOQUEADO)));
+        conferir("BLOQUEADO: avançou depois dos 5 (1115)", bloqueado.loop.offset() == 1115);
+        conferirLinha(bloqueado, 1110, "| comando | ignorado: remetente BLOQUEADO |");
+        conferirLinha(bloqueado, 1111, "| texto | ignorado: remetente BLOQUEADO |");
+        conferirLinha(bloqueado, 1113, "| edição | ignorado: remetente BLOQUEADO |");
+
+        // PENDENTE: "aguardando aprovação" para tudo, menos edição (silêncio).
+        Cenario pendente = new Cenario();
+        pendente.telegram.updates.addAll(List.of(
+                texto(1120, ID_TELEGRAM_PENDENTE, NOME_PENDENTE, "supino 3x10 com 20 do Beltrano"),
+                figurinha(1121, ID_TELEGRAM_PENDENTE, NOME_PENDENTE),
+                texto(1122, ID_TELEGRAM_PENDENTE, NOME_PENDENTE, "/aprovar " + ID_USUARIO_PENDENTE),
+                edicao(1123, ID_TELEGRAM_PENDENTE, NOME_PENDENTE, "supino corrigido do Beltrano"),
+                texto(1124, ID_TELEGRAM_PENDENTE, NOME_PENDENTE, "/xyz do Beltrano")));
+        pendente.rodarAteEsvaziar();
+        conferir("PENDENTE: 'aguardando aprovação' para texto, figurinha, /aprovar e /xyz; edição em silêncio",
+                pendente.telegram.enviadas.equals(Collections.nCopies(4, Textos.AGUARDANDO_APROVACAO)));
+        conferir("PENDENTE: todas as respostas no chat dele", todosPara(pendente, ID_TELEGRAM_PENDENTE));
+        conferir("PENDENTE: nada registrado (TR_MENSAGEM não muda) nem aprovado; continua PENDENTE",
+                pendente.nadaGravado() && "PENDENTE".equals(pendente.status(ID_TELEGRAM_PENDENTE)));
+        conferirLinha(pendente, 1120, "| texto | ignorado: remetente PENDENTE |");
+        conferirLinha(pendente, 1121, "| figurinha | ignorado: remetente PENDENTE |");
+        conferirLinha(pendente, 1122, "| comando | ignorado: remetente PENDENTE |");
+        conferirLinha(pendente, 1123, "| edição | ignorado: edição de remetente PENDENTE |");
+
+        // PENDENTE manda /start de novo: "aguardando" e o admin é REAVISADO.
+        Cenario reaviso = new Cenario();
+        reaviso.telegram.updates.add(texto(1130, ID_TELEGRAM_PENDENTE, NOME_PENDENTE, "/start"));
+        reaviso.rodarAteEsvaziar();
+        conferir("PENDENTE /start: 'aguardando' para ele e aviso (nome + ID_USUARIO) para o admin",
+                reaviso.telegram.enviadas.equals(List.of(Textos.AGUARDANDO_APROVACAO,
+                        Textos.AVISO_ADMIN.formatted(NOME_PENDENTE, ID_USUARIO_PENDENTE))));
+        conferir("PENDENTE /start: destinos = chat dele, depois chat do admin",
+                reaviso.telegram.destinos.equals(List.of(ID_TELEGRAM_PENDENTE, ID_TELEGRAM_ADMIN)));
+        conferir("PENDENTE /start: não cadastra de novo", reaviso.nadaGravado());
+        conferirLinha(reaviso, 1130, "| comando | start: já PENDENTE, admin reavisado |");
+
+        // ATIVO manda /start (com e sem @Bot; o admin também é ATIVO).
+        Cenario ativo = new Cenario();
+        ativo.telegram.updates.addAll(List.of(
+                texto(1140, ID_TELEGRAM_ATIVO, NOME_ATIVO, "/start"),
+                texto(1141, ID_TELEGRAM_ATIVO, NOME_ATIVO, "/start@TreinoBot"),
+                texto(1142, ID_TELEGRAM_ADMIN, NOME_ADMIN, "/start")));
+        ativo.rodarAteEsvaziar();
+        conferir("ATIVO /start, /start@TreinoBot e o admin: 'você já está cadastrado'",
+                ativo.telegram.enviadas.equals(Collections.nCopies(3, Textos.JA_CADASTRADO)));
+        conferir("ATIVO /start: cada resposta no chat de quem mandou", ativo.telegram.destinos
+                .equals(List.of(ID_TELEGRAM_ATIVO, ID_TELEGRAM_ATIVO, ID_TELEGRAM_ADMIN)));
+        conferir("ATIVO /start: nada cadastrado nem registrado", ativo.nadaGravado());
+        conferirLinha(ativo, 1141, "| comando | start: já cadastrado |");
+    }
+
+    // --- 6b, regras 1, 3 e 4: /start de quem não está cadastrado ------------------------------
+
+    private static void cadastroPeloStart() throws InterruptedException {
+        titulo("6b: /start de desconhecido (regras 1, 3 e 4)");
+
+        Cenario c = new Cenario();
+        c.telegram.updates.add(texto(1200, ID_TELEGRAM_DESCONHECIDO, NOME_NOVO, "/start"));
+        c.rodarAteEsvaziar();
+        conferir("cadastrar chamado 1 vez, com o from.id",
+                c.cadastro.cadastros == 1 && c.cadastro.idTelegram == ID_TELEGRAM_DESCONHECIDO);
+        conferir("NOME = first_name, como veio", NOME_NOVO.equals(c.cadastro.nome));
+        conferir("DATA_CADASTRO = date de envio em São Paulo (09/10 10:02:15)",
+                LocalDateTime.of(2026, 10, 9, 10, 2, 15).equals(c.cadastro.dataCadastro));
+        conferir("ficou PENDENTE", "PENDENTE".equals(c.status(ID_TELEGRAM_DESCONHECIDO)));
+        String aviso = Textos.AVISO_ADMIN.formatted(NOME_NOVO, PRIMEIRO_ID_GERADO);
+        conferir("enviou boas-vindas e aviso ao admin, nessa ordem",
+                c.telegram.enviadas.equals(List.of(Textos.BOAS_VINDAS, aviso)));
+        conferir("boas-vindas no chat de quem pediu; aviso no chat do admin",
+                c.telegram.destinos.equals(List.of(ID_TELEGRAM_DESCONHECIDO, ID_TELEGRAM_ADMIN)));
+        conferir("aviso leva o ID_USUARIO gerado, nunca o from.id",
+                aviso.contains("/aprovar " + PRIMEIRO_ID_GERADO)
+                        && !aviso.contains(String.valueOf(ID_TELEGRAM_DESCONHECIDO)));
+        conferir("/start não vai para o registrar (TR_MENSAGEM não muda)", c.registrador.chamadas == 0);
+        conferir("avançou (1201)", c.loop.offset() == 1201);
+        conferirLinha(c, 1200, "| comando | start: cadastrado PENDENTE |");
+        System.out.println("        boas-vindas (conferir os 4 pontos obrigatórios):");
+        System.out.println(recuar(Textos.BOAS_VINDAS));
+
+        // Comando pelo primeiro token: "@nome_do_bot" tirado; parâmetro do link
+        // t.me/bot?start=site ignorado.
+        Cenario sufixo = new Cenario();
+        sufixo.telegram.updates.add(texto(1210, ID_TELEGRAM_DESCONHECIDO, NOME_NOVO, "/start@TreinoBot"));
+        sufixo.rodarAteEsvaziar();
+        conferir("/start@TreinoBot: cadastra",
+                sufixo.cadastro.cadastros == 1 && "PENDENTE".equals(sufixo.status(ID_TELEGRAM_DESCONHECIDO)));
+        Cenario parametro = new Cenario();
+        parametro.telegram.updates.add(texto(1211, ID_TELEGRAM_DESCONHECIDO, NOME_NOVO, "/start site"));
+        parametro.rodarAteEsvaziar();
+        conferir("/start site (link do site estático): cadastra",
+                parametro.cadastro.cadastros == 1 && "PENDENTE".equals(parametro.status(ID_TELEGRAM_DESCONHECIDO)));
+
+        // Limite do NOME em caracteres, não em unidades UTF-16: 100 emojis (200
+        // unidades) cabem no VARCHAR2(100 CHAR); 101 não.
+        String nome100 = segredo("💪".repeat(100));
+        Cenario cem = new Cenario();
+        cem.telegram.updates.add(texto(1220, ID_TELEGRAM_DESCONHECIDO, nome100, "/start"));
+        cem.rodarAteEsvaziar();
+        conferir("first_name com 100 emojis: cadastrado inteiro (sem truncar)",
+                cem.cadastro.cadastros == 1 && nome100.equals(cem.cadastro.nome));
+
+        // first_name fora do contrato: erro inesperado, avança, SEM resposta, nada cadastrado.
+        String nome101 = segredo("💪".repeat(101));
+        Cenario invalidos = new Cenario();
+        invalidos.telegram.updates.addAll(List.of(
+                startComFrom(1230, ""),
+                startComFrom(1231, ", \"first_name\": \"   \""),
+                startComFrom(1232, ", \"first_name\": \"\""),
+                startComFrom(1233, ", \"first_name\": null"),
+                startComFrom(1234, ", \"first_name\": 42"),
+                texto(1235, ID_TELEGRAM_DESCONHECIDO, nome101, "/start")));
+        invalidos.rodarAteEsvaziar();
+        conferir("first_name ausente, branco, vazio, null, número ou com 101 caracteres: avançou (1236)",
+                invalidos.loop.offset() == 1236);
+        conferir("first_name inválido: sem resposta (nem a quem pediu, nem ao admin)",
+                invalidos.telegram.tentativasDeEnvio == 0);
+        conferir("first_name inválido: nada cadastrado (nunca truncado)", invalidos.cadastro.cadastros == 0);
+        conferirLinha(invalidos, 1230, "| comando | erro inesperado (");
+        for (long updateId = 1231; updateId <= 1235; updateId++) {
+            conferirLinha(invalidos, updateId, "| comando | erro inesperado (IllegalArgumentException); avançou |");
+        }
+
+        // Conexão caída no cadastro: não avança, espera, e na volta do banco cadastra.
+        Cenario conexao = new Cenario();
+        conexao.cadastro.falhasNoCadastro.add(new SQLRecoverableException("IO Error", "08006", 17002));
+        conexao.telegram.updates.add(texto(1240, ID_TELEGRAM_DESCONHECIDO, NOME_NOVO, "/start"));
+        conexao.loop.umaVolta();
+        conferir("conexão no cadastro: não avançou", conexao.loop.offset() == 0);
+        conferir("conexão no cadastro: espera 5 s", segundos(conexao.esperas).equals(List.of(5L)));
+        conferir("conexão no cadastro: sem resposta nem aviso enquanto tenta",
+                conexao.telegram.tentativasDeEnvio == 0);
+        conferirLinha(conexao, 1240, "erro no banco ao cadastrar (ORA-17002), tentativa 1 de 10; repete em 5 s");
+        conexao.rodarAteEsvaziar();
+        conferir("conexão no cadastro: na 2ª tentativa cadastrou e avançou", conexao.cadastro.cadastros == 2
+                && "PENDENTE".equals(conexao.status(ID_TELEGRAM_DESCONHECIDO)) && conexao.loop.offset() == 1241);
+        conferir("conexão no cadastro: boas-vindas e aviso uma vez só", conexao.telegram.enviadas.equals(
+                List.of(Textos.BOAS_VINDAS, Textos.AVISO_ADMIN.formatted(NOME_NOVO, PRIMEIRO_ID_GERADO))));
+
+        // Recusa (ex.: UQ_TR_USUARIO_ID_TELEGRAM): avança. É o caminho do /start,
+        // então quem pediu recebe o aviso de erro; o admin, nada (não houve cadastro).
+        Cenario recusa = new Cenario();
+        recusa.cadastro.falhasNoCadastro.add(
+                new SQLIntegrityConstraintViolationException("ORA-00001: unique constraint", "23000", 1));
+        recusa.telegram.updates.add(texto(1250, ID_TELEGRAM_DESCONHECIDO, NOME_NOVO, "/start"));
+        recusa.rodarAteEsvaziar();
+        conferir("recusa no cadastro: avançou sem esperar", recusa.loop.offset() == 1251
+                && recusa.esperas.isEmpty() && recusa.cadastro.cadastros == 1);
+        conferir("recusa no cadastro: 'não consegui salvar' para quem pediu; nada para o admin",
+                recusa.telegram.enviadas.equals(List.of(Textos.NAO_CONSEGUI_SALVAR))
+                        && recusa.telegram.destinos.equals(List.of(ID_TELEGRAM_DESCONHECIDO)));
+        conferir("recusa no cadastro: ninguém cadastrado", recusa.status(ID_TELEGRAM_DESCONHECIDO) == null);
+        conferirLinha(recusa, 1250, "recusa do banco ao cadastrar (ORA-00001); avançou");
+
+        // Aviso ao admin falha: regra de envio da 6a (2 tentativas, 2 s entre elas),
+        // depois desiste e avança; a linha de log registra.
+        Cenario avisoFalha = new Cenario();
+        avisoFalha.telegram.chatsComFalha.put(ID_TELEGRAM_ADMIN, new ErroTelegram(500));
+        avisoFalha.telegram.updates.add(texto(1260, ID_TELEGRAM_DESCONHECIDO, NOME_NOVO, "/start"));
+        avisoFalha.rodarAteEsvaziar();
+        conferir("aviso ao admin falha: boas-vindas chegou; 1 + 2 tentativas; espera 2 s",
+                avisoFalha.telegram.enviadas.equals(List.of(Textos.BOAS_VINDAS))
+                        && avisoFalha.telegram.tentativasDeEnvio == 3
+                        && segundos(avisoFalha.esperas).equals(List.of(2L)));
+        conferir("aviso ao admin falha: cadastrado mesmo assim, e avançou",
+                "PENDENTE".equals(avisoFalha.status(ID_TELEGRAM_DESCONHECIDO)) && avisoFalha.loop.offset() == 1261);
+        conferirLinha(avisoFalha, 1260,
+                "| comando | start: cadastrado PENDENTE; aviso ao admin não enviado (HTTP 500) |");
+    }
+
+    // --- 6b, regra 5: /aprovar ----------------------------------------------------------------
+
+    private static void aprovar() throws InterruptedException {
+        titulo("6b: /aprovar (regra 5)");
+
+        // De quem não é admin (ATIVO): a mesma resposta de um comando que não existe.
+        Cenario naoAdmin = new Cenario();
+        naoAdmin.telegram.updates.addAll(List.of(
+                texto(1300, ID_TELEGRAM_ATIVO, NOME_ATIVO, "/aprovar " + ID_USUARIO_PENDENTE),
+                texto(1301, ID_TELEGRAM_ATIVO, NOME_ATIVO, "/aprovar@TreinoBot " + ID_USUARIO_PENDENTE)));
+        naoAdmin.rodarAteEsvaziar();
+        conferir("não admin: 'comando não reconhecido', igual a um comando que não existe",
+                naoAdmin.telegram.enviadas.equals(Collections.nCopies(2, Textos.COMANDO_NAO_RECONHECIDO)));
+        conferir("não admin: nada aprovado; continua PENDENTE",
+                naoAdmin.cadastro.aprovacoes == 0 && "PENDENTE".equals(naoAdmin.status(ID_TELEGRAM_PENDENTE)));
+        conferirLinha(naoAdmin, 1300, "| comando | aprovar: remetente não é o admin |");
+
+        // Argumento inválido: uso, sem ir ao banco.
+        List<String> invalidos = List.of("/aprovar", "/aprovar abc", "/aprovar 0", "/aprovar -5",
+                "/aprovar 12 34", "/aprovar 3.0", "/aprovar 1234567890123456789");
+        Cenario uso = new Cenario();
+        for (int i = 0; i < invalidos.size(); i++) {
+            uso.telegram.updates.add(texto(1310 + i, ID_TELEGRAM_ADMIN, NOME_ADMIN, invalidos.get(i)));
+        }
+        uso.rodarAteEsvaziar();
+        conferir("admin, /aprovar sem argumento, abc, 0, -5, '12 34', 3.0, 19 dígitos: 'uso: /aprovar <id>'",
+                uso.telegram.enviadas.equals(Collections.nCopies(invalidos.size(), Textos.USO_APROVAR)));
+        conferir("uso: respostas no chat do admin", todosPara(uso, ID_TELEGRAM_ADMIN));
+        conferir("uso: o service não foi chamado", uso.cadastro.aprovacoes == 0);
+        conferirLinha(uso, 1311, "| comando | aprovar: uso |");
+
+        // Inexistente, já ativo, bloqueado: resposta própria, nenhum status muda.
+        Cenario respostas = new Cenario();
+        respostas.telegram.updates.addAll(List.of(
+                texto(1320, ID_TELEGRAM_ADMIN, NOME_ADMIN, "/aprovar " + ID_USUARIO_INEXISTENTE),
+                texto(1321, ID_TELEGRAM_ADMIN, NOME_ADMIN, "/aprovar " + ID_USUARIO_ATIVO),
+                texto(1322, ID_TELEGRAM_ADMIN, NOME_ADMIN, "/aprovar " + ID_USUARIO_BLOQUEADO)));
+        respostas.rodarAteEsvaziar();
+        conferir("inexistente, já ativo, bloqueado: as três respostas, na ordem", respostas.telegram.enviadas
+                .equals(List.of(Textos.ID_INEXISTENTE, Textos.JA_ATIVO, Textos.USUARIO_BLOQUEADO)));
+        conferir("o service recebeu o ID_USUARIO do argumento", respostas.cadastro.idsAprovados
+                .equals(List.of(ID_USUARIO_INEXISTENTE, ID_USUARIO_ATIVO, ID_USUARIO_BLOQUEADO)));
+        conferir("ATIVO continua ATIVO; BLOQUEADO continua BLOQUEADO (sem UPDATE)",
+                "ATIVO".equals(respostas.status(ID_TELEGRAM_ATIVO))
+                        && "BLOQUEADO".equals(respostas.status(ID_TELEGRAM_BLOQUEADO)));
+        conferirLinha(respostas, 1320, "| comando | aprovar: id inexistente |");
+        conferirLinha(respostas, 1321, "| comando | aprovar: já ativo |");
+        conferirLinha(respostas, 1322, "| comando | aprovar: bloqueado |");
+
+        // PENDENTE -> ATIVO (com @Bot); o aprovado recebe o aviso; de novo -> já ativo.
+        Cenario aprovacao = new Cenario();
+        aprovacao.telegram.updates.addAll(List.of(
+                texto(1330, ID_TELEGRAM_ADMIN, NOME_ADMIN, "/aprovar@TreinoBot " + ID_USUARIO_PENDENTE),
+                texto(1331, ID_TELEGRAM_ADMIN, NOME_ADMIN, "/aprovar " + ID_USUARIO_PENDENTE)));
+        aprovacao.rodarAteEsvaziar();
+        conferir("/aprovar@TreinoBot <id do PENDENTE>: ficou ATIVO",
+                "ATIVO".equals(aprovacao.status(ID_TELEGRAM_PENDENTE)));
+        conferir("'aprovado: <nome>' ao admin, 'acesso liberado' ao aprovado; de novo: 'já ativo'",
+                aprovacao.telegram.enviadas.equals(List.of(Textos.APROVADO.formatted(NOME_PENDENTE),
+                        Textos.ACESSO_LIBERADO, Textos.JA_ATIVO)));
+        conferir("destinos: admin, aprovado, admin", aprovacao.telegram.destinos
+                .equals(List.of(ID_TELEGRAM_ADMIN, ID_TELEGRAM_PENDENTE, ID_TELEGRAM_ADMIN)));
+        conferirLinha(aprovacao, 1330, "| comando | aprovar: aprovado |");
+        conferirLinha(aprovacao, 1331, "| comando | aprovar: já ativo |");
+
+        // O aprovado bloqueou o bot (403): o admin já recebeu "aprovado"; o log registra.
+        Cenario bloqueouBot = new Cenario();
+        bloqueouBot.telegram.chatsComFalha.put(ID_TELEGRAM_PENDENTE, new ErroTelegram(403));
+        bloqueouBot.telegram.updates.add(texto(1340, ID_TELEGRAM_ADMIN, NOME_ADMIN, "/aprovar " + ID_USUARIO_PENDENTE));
+        bloqueouBot.rodarAteEsvaziar();
+        conferir("aviso ao aprovado com 403: admin recebeu 'aprovado'; 403 sem nova tentativa",
+                bloqueouBot.telegram.enviadas.equals(List.of(Textos.APROVADO.formatted(NOME_PENDENTE)))
+                        && bloqueouBot.telegram.tentativasDeEnvio == 2 && bloqueouBot.esperas.isEmpty());
+        conferir("aviso ao aprovado com 403: aprovado mesmo assim, e avançou",
+                "ATIVO".equals(bloqueouBot.status(ID_TELEGRAM_PENDENTE)) && bloqueouBot.loop.offset() == 1341);
+        conferirLinha(bloqueouBot, 1340, "| aprovar: aprovado; aviso ao aprovado não enviado (HTTP 403) |");
+
+        // Conexão caída no /aprovar: não avança, espera; na volta, aprova.
+        Cenario conexao = new Cenario();
+        conexao.cadastro.falhasNaAprovacao.add(new SQLRecoverableException("IO Error", "08006", 17002));
+        conexao.telegram.updates.add(texto(1350, ID_TELEGRAM_ADMIN, NOME_ADMIN, "/aprovar " + ID_USUARIO_PENDENTE));
+        conexao.loop.umaVolta();
+        conferir("conexão no /aprovar: não avançou, espera 5 s, sem resposta", conexao.loop.offset() == 0
+                && segundos(conexao.esperas).equals(List.of(5L)) && conexao.telegram.tentativasDeEnvio == 0);
+        conferirLinha(conexao, 1350, "erro no banco ao aprovar (ORA-17002), tentativa 1 de 10; repete em 5 s");
+        conexao.rodarAteEsvaziar();
+        conferir("conexão no /aprovar: na 2ª tentativa aprovou e avançou", conexao.cadastro.aprovacoes == 2
+                && "ATIVO".equals(conexao.status(ID_TELEGRAM_PENDENTE)) && conexao.loop.offset() == 1351
+                && conexao.telegram.enviadas.equals(List.of(Textos.APROVADO.formatted(NOME_PENDENTE),
+                        Textos.ACESSO_LIBERADO)));
+
+        // Recusa no /aprovar: avança e avisa o admin; nada mudou.
+        Cenario recusa = new Cenario();
+        recusa.cadastro.falhasNaAprovacao.add(
+                new SQLSyntaxErrorException("ORA-00942: table or view does not exist", "42000", 942));
+        recusa.telegram.updates.add(texto(1360, ID_TELEGRAM_ADMIN, NOME_ADMIN, "/aprovar " + ID_USUARIO_PENDENTE));
+        recusa.rodarAteEsvaziar();
+        conferir("recusa no /aprovar: avançou sem esperar; 'não consegui salvar' ao admin; continua PENDENTE",
+                recusa.loop.offset() == 1361 && recusa.esperas.isEmpty()
+                        && recusa.telegram.enviadas.equals(List.of(Textos.NAO_CONSEGUI_SALVAR))
+                        && todosPara(recusa, ID_TELEGRAM_ADMIN)
+                        && "PENDENTE".equals(recusa.status(ID_TELEGRAM_PENDENTE)));
+        conferirLinha(recusa, 1360, "recusa do banco ao aprovar (ORA-00942); avançou");
+    }
+
+    // --- 6b: o fluxo do critério de aceite 2, sem celular ----------------------------------
+
+    private static void fluxoCompleto() throws InterruptedException {
+        titulo("6b: fluxo completo (critério de aceite 2a a 2h, com falsos)");
+        Cenario c = new Cenario();
+        long idDela = PRIMEIRO_ID_GERADO;
+        String treino = "supino 3x10 com 20 da Sicrana";
+        c.registrador.respostas.add(() -> ResultadoRegistro.registrado(LocalDate.of(2026, 10, 9),
+                List.of(gravada("supino", "Supino reto barra", 7L, 1, 20.0, false, 10, false, null)), List.of(),
+                false));
+        c.telegram.updates.addAll(List.of(
+                texto(1400, ID_TELEGRAM_DESCONHECIDO, NOME_NOVO, "oi, posso usar o bot?"),     // a
+                texto(1401, ID_TELEGRAM_DESCONHECIDO, NOME_NOVO, "/start"),                     // b
+                texto(1402, ID_TELEGRAM_DESCONHECIDO, NOME_NOVO, treino),                       // c
+                texto(1403, ID_TELEGRAM_DESCONHECIDO, NOME_NOVO, "/aprovar 1"),                 // d (ainda PENDENTE)
+                texto(1404, ID_TELEGRAM_ADMIN, NOME_ADMIN, "/aprovar abc"),                     // e
+                texto(1405, ID_TELEGRAM_ADMIN, NOME_ADMIN, "/aprovar " + ID_USUARIO_INEXISTENTE), // e
+                texto(1406, ID_TELEGRAM_ADMIN, NOME_ADMIN, "/aprovar " + idDela),               // f
+                texto(1407, ID_TELEGRAM_ADMIN, NOME_ADMIN, "/aprovar " + idDela),               // f, de novo
+                texto(1408, ID_TELEGRAM_DESCONHECIDO, NOME_NOVO, "/aprovar 1"),                 // d, já ATIVA
+                texto(1409, ID_TELEGRAM_DESCONHECIDO, NOME_NOVO, treino + " (de novo)")));      // g
+        c.rodarAteEsvaziar();
+
+        List<String> esperadas = List.of(
+                Textos.BOAS_VINDAS, Textos.AVISO_ADMIN.formatted(NOME_NOVO, idDela),            // b
+                Textos.AGUARDANDO_APROVACAO,                                                   // c
+                Textos.AGUARDANDO_APROVACAO,                                                   // d
+                Textos.USO_APROVAR, Textos.ID_INEXISTENTE,                                     // e
+                Textos.APROVADO.formatted(NOME_NOVO), Textos.ACESSO_LIBERADO, Textos.JA_ATIVO, // f
+                Textos.COMANDO_NAO_RECONHECIDO);                                               // d, já ATIVA
+        List<Long> destinos = List.of(ID_TELEGRAM_DESCONHECIDO, ID_TELEGRAM_ADMIN, ID_TELEGRAM_DESCONHECIDO,
+                ID_TELEGRAM_DESCONHECIDO, ID_TELEGRAM_ADMIN, ID_TELEGRAM_ADMIN, ID_TELEGRAM_ADMIN,
+                ID_TELEGRAM_DESCONHECIDO, ID_TELEGRAM_ADMIN, ID_TELEGRAM_DESCONHECIDO, ID_TELEGRAM_DESCONHECIDO);
+        List<String> enviadas = c.telegram.enviadas;
+        conferir("a-f: respostas e avisos na ordem (11 envios)",
+                enviadas.size() == 11 && enviadas.subList(0, 10).equals(esperadas));
+        conferir("a-g: cada envio no chat certo (dela ou do admin)", c.telegram.destinos.equals(destinos));
+        conferir("a: 'oi' antes do /start não cadastrou (1 cadastro só, no b)", c.cadastro.cadastros == 1);
+        conferir("c: o treino de quem está PENDENTE não foi registrado (registrar só no g)",
+                c.registrador.chamadas == 1);
+        conferir("g: confirmação com a data para ela",
+                enviadas.size() == 11 && enviadas.get(10).startsWith(Textos.REGISTRADO_EM.formatted("09/10/2026")));
+        conferir("g: registrado com o ID_USUARIO DELA, não o do admin",
+                c.registrador.idUsuario == idDela && (treino + " (de novo)").equals(c.registrador.texto));
+
+        // h: o Vitor bloqueia pelo SQL Developer (aqui, direto no mapa) -> silêncio.
+        Usuario dela = c.usuarios.get(ID_TELEGRAM_DESCONHECIDO);
+        c.usuarios.put(ID_TELEGRAM_DESCONHECIDO, new Usuario(dela.idUsuario(), dela.idTelegram(), dela.nome(),
+                "BLOQUEADO", dela.dataCadastro()));
+        int enviosAntes = c.telegram.tentativasDeEnvio;
+        c.telegram.updates.addAll(List.of(
+                texto(1410, ID_TELEGRAM_DESCONHECIDO, NOME_NOVO, "outro treino da Sicrana"),
+                texto(1411, ID_TELEGRAM_DESCONHECIDO, NOME_NOVO, "/start")));
+        c.rodarAteEsvaziar();
+        conferir("h: BLOQUEADA -> silêncio; nada registrado nem cadastrado",
+                c.telegram.tentativasDeEnvio == enviosAntes && c.registrador.chamadas == 1
+                        && c.cadastro.cadastros == 1 && c.loop.offset() == 1412);
+    }
+
     // --- Seção 8: nada sensível no log ----------------------------------------------------
 
     private static void higieneDoLog() {
@@ -599,6 +1004,28 @@ public class TelegramSpike {
                 "\"text\": " + aspas(segredo(texto)));
     }
 
+    private static JsonNode figurinha(long updateId, long fromId, String nome) {
+        return mensagem("message", updateId, fromId, nome, "private", fromId, DATA_ENVIO,
+                "\"sticker\": {\"file_id\": \"abc123\", \"emoji\": \"💪\"}");
+    }
+
+    private static JsonNode edicao(long updateId, long fromId, String nome, String texto) {
+        return mensagem("edited_message", updateId, fromId, nome, "private", fromId, DATA_ENVIO,
+                "\"edit_date\": " + DATA_ENVIO + ", \"text\": " + aspas(segredo(texto)));
+    }
+
+    // /start de quem não está cadastrado, com o first_name montado à mão: o resto
+    // do objeto "from" vai em "campos" (vazio = sem first_name).
+    private static JsonNode startComFrom(long updateId, String campos) {
+        return json("""
+                {"update_id": %d, "message": {"message_id": %d, "date": %d,
+                 "chat": {"id": %d, "type": "private"},
+                 "from": {"id": %d, "is_bot": false%s},
+                 "text": "/start"}}
+                """.formatted(updateId, updateId + 5000, DATA_ENVIO, ID_TELEGRAM_DESCONHECIDO,
+                ID_TELEGRAM_DESCONHECIDO, campos));
+    }
+
     // message_id = update_id + 5000, para os dois não se confundirem nas conferências.
     private static JsonNode mensagem(String campo, long updateId, long fromId, String nome, String tipoChat,
             long chatId, long data, String conteudo) {
@@ -663,6 +1090,11 @@ public class TelegramSpike {
         return esperas.stream().map(Duration::toSeconds).toList();
     }
 
+    // Houve envio, e todos foram para o mesmo chat.
+    private static boolean todosPara(Cenario c, long chatId) {
+        return !c.telegram.destinos.isEmpty() && c.telegram.destinos.stream().allMatch(id -> id == chatId);
+    }
+
     private static String recuar(String texto) {
         return texto == null ? "        (nada enviado)" : "          " + texto.replace("\n", "\n          ");
     }
@@ -673,19 +1105,26 @@ public class TelegramSpike {
     private static final class Cenario {
         final TelegramFalso telegram = new TelegramFalso();
         final RegistradorFalso registrador = new RegistradorFalso();
+        // O "TR_USUARIO" do cenário. Declarado antes do cadastro: o cadastro falso
+        // grava e aprova neste mesmo mapa, que a busca do remetente lê.
         final Map<Long, Usuario> usuarios = new HashMap<>();
+        final CadastroFalso cadastro = new CadastroFalso(usuarios);
         final List<Duration> esperas = new ArrayList<>();
         final List<String> log = new ArrayList<>();
         SQLException erroNaBusca;
         final LoopTelegram loop;
 
         Cenario() {
-            LocalDateTime cadastro = LocalDateTime.of(2026, 10, 8, 20, 0);
+            LocalDateTime dataCadastro = LocalDateTime.of(2026, 10, 8, 20, 0);
             usuarios.put(ID_TELEGRAM_ATIVO, new Usuario(ID_USUARIO_ATIVO, ID_TELEGRAM_ATIVO, NOME_ATIVO, "ATIVO",
-                    cadastro));
-            usuarios.put(ID_TELEGRAM_PENDENTE, new Usuario(888456L, ID_TELEGRAM_PENDENTE, NOME_PENDENTE, "PENDENTE",
-                    cadastro));
-            loop = new LoopTelegram(telegram, registrador, this::buscar, esperas::add,
+                    dataCadastro));
+            usuarios.put(ID_TELEGRAM_PENDENTE, new Usuario(ID_USUARIO_PENDENTE, ID_TELEGRAM_PENDENTE, NOME_PENDENTE,
+                    "PENDENTE", dataCadastro));
+            usuarios.put(ID_TELEGRAM_ADMIN, new Usuario(ID_USUARIO_ADMIN, ID_TELEGRAM_ADMIN, NOME_ADMIN, "ATIVO",
+                    dataCadastro));
+            usuarios.put(ID_TELEGRAM_BLOQUEADO, new Usuario(ID_USUARIO_BLOQUEADO, ID_TELEGRAM_BLOQUEADO,
+                    NOME_BLOQUEADO, "BLOQUEADO", dataCadastro));
+            loop = new LoopTelegram(telegram, registrador, this::buscar, cadastro, ID_TELEGRAM_ADMIN, esperas::add,
                     Clock.fixed(AGORA, SAO_PAULO), linha -> {
                         log.add(linha);
                         LOG_GERAL.add(linha);
@@ -698,6 +1137,17 @@ public class TelegramSpike {
                 throw erroNaBusca;
             }
             return Optional.ofNullable(usuarios.get(idTelegram));
+        }
+
+        // Status atual no "banco" do cenário; null = não cadastrado.
+        String status(long idTelegram) {
+            Usuario usuario = usuarios.get(idTelegram);
+            return usuario == null ? null : usuario.status();
+        }
+
+        // Nem cadastro, nem aprovação, nem registro (TR_MENSAGEM) foram chamados.
+        boolean nadaGravado() {
+            return cadastro.cadastros == 0 && cadastro.aprovacoes == 0 && registrador.chamadas == 0;
         }
 
         // Volta a volta até o Telegram falso não ter mais nada para entregar.
@@ -725,6 +1175,9 @@ public class TelegramSpike {
         // Consumidas uma por chamada, antes de entregar/enviar. Vazia = sucesso.
         final Deque<Exception> falhasNoGetUpdates = new ArrayDeque<>();
         final Deque<Exception> falhasNoEnvio = new ArrayDeque<>();
+        // 6b: todo envio para este chat falha com esta exceção (o aviso ao admin
+        // falhando depois da boas-vindas ter chegado, o aprovado que bloqueou o bot).
+        final Map<Long, Exception> chatsComFalha = new HashMap<>();
         final List<String> enviadas = new ArrayList<>();
         final List<Long> destinos = new ArrayList<>();
         int tentativasDeEnvio = 0;
@@ -745,6 +1198,7 @@ public class TelegramSpike {
         public void enviarMensagem(long chatId, String texto) throws IOException, ErroTelegram {
             tentativasDeEnvio++;
             lancar(falhasNoEnvio.poll());
+            lancar(chatsComFalha.get(chatId));
             enviadas.add(texto);
             destinos.add(chatId);
         }
@@ -802,6 +1256,74 @@ public class TelegramSpike {
             this.texto = texto;
             Resposta resposta = respostas.poll();
             return (resposta != null ? resposta : padrao).dar();
+        }
+    }
+
+    /**
+     * Cadastro em memória (6b), sobre o MESMO mapa que a busca do remetente lê:
+     * depois de um /start, o próximo update do mesmo from.id já encontra o
+     * PENDENTE, como no banco. Decide o /aprovar pelas mesmas regras do
+     * CadastroService (o CadastroSpike confere o service de verdade, no banco).
+     * Falha programada (SQLException) é lançada antes de mexer no mapa: como um
+     * rollback, nada fica "gravado".
+     */
+    private static final class CadastroFalso implements Cadastrador {
+        private final Map<Long, Usuario> usuarios;
+        private long proximoId = PRIMEIRO_ID_GERADO;
+        final Deque<SQLException> falhasNoCadastro = new ArrayDeque<>();
+        final Deque<SQLException> falhasNaAprovacao = new ArrayDeque<>();
+        int cadastros = 0;
+        int aprovacoes = 0;
+        long idTelegram;
+        String nome;
+        LocalDateTime dataCadastro;
+        final List<Long> idsAprovados = new ArrayList<>();
+
+        CadastroFalso(Map<Long, Usuario> usuarios) {
+            this.usuarios = usuarios;
+        }
+
+        @Override
+        public long cadastrarPendente(long idTelegram, String nome, LocalDateTime dataCadastro) throws SQLException {
+            cadastros++;
+            this.idTelegram = idTelegram;
+            this.nome = nome;
+            this.dataCadastro = dataCadastro;
+            SQLException falha = falhasNoCadastro.poll();
+            if (falha != null) {
+                throw falha;
+            }
+            long idUsuario = proximoId++;
+            // O id gerado também é um ID_USUARIO: entra na lista do que não pode ir para o log.
+            segredo(String.valueOf(idUsuario));
+            usuarios.put(idTelegram, new Usuario(idUsuario, idTelegram, nome, "PENDENTE", dataCadastro));
+            return idUsuario;
+        }
+
+        @Override
+        public ResultadoAprovacao aprovar(long idUsuario) throws SQLException {
+            aprovacoes++;
+            idsAprovados.add(idUsuario);
+            SQLException falha = falhasNaAprovacao.poll();
+            if (falha != null) {
+                throw falha;
+            }
+            Usuario usuario = usuarios.values().stream()
+                    .filter(u -> u.idUsuario() == idUsuario)
+                    .findFirst()
+                    .orElse(null);
+            if (usuario == null) {
+                return ResultadoAprovacao.inexistente();
+            }
+            if ("ATIVO".equals(usuario.status())) {
+                return ResultadoAprovacao.jaAtivo();
+            }
+            if ("BLOQUEADO".equals(usuario.status())) {
+                return ResultadoAprovacao.bloqueado();
+            }
+            usuarios.put(usuario.idTelegram(), new Usuario(usuario.idUsuario(), usuario.idTelegram(), usuario.nome(),
+                    "ATIVO", usuario.dataCadastro()));
+            return ResultadoAprovacao.aprovado(usuario.nome(), usuario.idTelegram());
         }
     }
 }

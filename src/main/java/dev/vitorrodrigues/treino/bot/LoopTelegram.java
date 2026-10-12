@@ -11,20 +11,26 @@ import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.function.Consumer;
+import java.util.regex.Pattern;
 
+import dev.vitorrodrigues.treino.modelo.ResultadoAprovacao;
 import dev.vitorrodrigues.treino.modelo.ResultadoRegistro;
 import dev.vitorrodrigues.treino.modelo.Usuario;
+import dev.vitorrodrigues.treino.service.Cadastrador;
 import dev.vitorrodrigues.treino.service.Registrador;
 import tools.jackson.databind.JsonNode;
 
 /**
  * O loop do bot (fatia 6a): getUpdates -> filtros -> RegistroService -> resposta.
+ * Fatia 6b: cadastro pelo bot (/start de quem não está cadastrado vira PENDENTE)
+ * e /aprovar do administrador.
  *
  * REGRA CENTRAL DO OFFSET. O offset diz ao Telegram "até aqui já processei"; o
  * que fica antes dele o Telegram apaga. Então o offset só avança quando a
@@ -36,12 +42,14 @@ import tools.jackson.databind.JsonNode;
  * paralelo, a mesma data poderia ganhar duas sessões).
  *
  * Todas as dependências chegam por interface (ClienteTelegram, Registrador,
- * BuscaUsuario, Espera), mais o relógio e a saída do log. Assim o TelegramSpike
- * exercita o loop inteiro sem celular, sem banco e sem rede.
+ * BuscaUsuario, Cadastrador, Espera), mais o relógio e a saída do log. Assim o
+ * TelegramSpike exercita o loop inteiro sem celular, sem banco e sem rede.
  *
- * LOG: uma linha por update. Nunca vai para o log: texto da mensagem, nome,
- * from.id, ID_USUARIO, dúvidas, token. Só tipo, situação, motivo (que, por
- * contrato, não tem texto do usuário), código ORA, status HTTP e nome de classe.
+ * LOG: uma linha por update. Nunca vai para o log: texto da mensagem, nome
+ * (first_name), from.id, ID_USUARIO, argumento do /aprovar, dúvidas, token. Só
+ * tipo, situação, motivo (que, por contrato, não tem texto do usuário), código
+ * ORA, status HTTP e nome de classe. Nunca imprimir um Usuario: o toString() dele
+ * tem nome e id.
  */
 public class LoopTelegram {
 
@@ -100,9 +108,28 @@ public class LoopTelegram {
             Map.entry("contact", "contato"),
             Map.entry("poll", "enquete"));
 
+    // Comandos conhecidos (6b). Comparação exata, depois de tirar o "@nome_do_bot".
+    private static final String START = "/start";
+    private static final String APROVAR = "/aprovar";
+
+    private static final String PENDENTE = "PENDENTE";
+
+    // TR_USUARIO.NOME é VARCHAR2(100 CHAR). O Telegram garante de 1 a 64
+    // caracteres no first_name, então isto só barra um update fora do contrato.
+    private static final int MAX_NOME = 100;
+
+    // Argumento do /aprovar: só dígitos ASCII, de 1 a 18. 18 dígitos sempre cabem
+    // num long (o parse nunca estoura), e "+3", "-3", "3.0", "3 4" e dígitos de
+    // outros alfabetos ficam de fora: tudo isso é "uso: /aprovar <id>".
+    private static final Pattern ID_NO_ARGUMENTO = Pattern.compile("[0-9]{1,18}");
+
     private final ClienteTelegram telegram;
     private final Registrador registrador;
     private final BuscaUsuario usuarios;
+    private final Cadastrador cadastro;
+    // TELEGRAM_CHAT_ID_PERMITIDO: o from.id do administrador. É também o chat id
+    // do aviso de novo pedido: na conversa privada, chat id = from.id.
+    private final long idAdministrador;
     private final Espera espera;
     private final Clock relogio;
     private final Consumer<String> log;
@@ -120,10 +147,12 @@ public class LoopTelegram {
     private int tentativasNoBanco = 0;
 
     public LoopTelegram(ClienteTelegram telegram, Registrador registrador, BuscaUsuario usuarios,
-            Espera espera, Clock relogio, Consumer<String> log) {
+            Cadastrador cadastro, long idAdministrador, Espera espera, Clock relogio, Consumer<String> log) {
         this.telegram = Objects.requireNonNull(telegram, "telegram");
         this.registrador = Objects.requireNonNull(registrador, "registrador");
         this.usuarios = Objects.requireNonNull(usuarios, "usuarios");
+        this.cadastro = Objects.requireNonNull(cadastro, "cadastro");
+        this.idAdministrador = idAdministrador;
         this.espera = Objects.requireNonNull(espera, "espera");
         this.relogio = Objects.requireNonNull(relogio, "relogio");
         this.log = Objects.requireNonNull(log, "log");
@@ -241,10 +270,16 @@ public class LoopTelegram {
     private static final class Atendimento {
         String tipo = "desconhecido";
         String resultado = SEM_RESULTADO;
-        // Preenchido só depois de confirmar que o remetente está ATIVO. null = o
-        // bot NÃO responde (ver responder).
+        // null = o bot NÃO responde (ver responder). Preenchido só quando o bot
+        // sabe que pode falar com o remetente: ATIVO; PENDENTE (menos na edição);
+        // desconhecido SÓ no caminho do /start (regra 2 da 6b).
         Long chatId;
-        String falhaNoEnvio;
+        // Em que ponto uma SQLException aconteceu, para a linha de log
+        // (tratarErroNoBanco). Começa na busca do remetente, o primeiro acesso ao banco.
+        String etapa = "ao buscar o remetente";
+        // Um update pode mandar até duas mensagens (resposta + aviso ao admin, ou
+        // resposta + aviso ao aprovado): cada envio que falhou vira um item.
+        final List<String> falhasNoEnvio = new ArrayList<>();
     }
 
     /**
@@ -282,8 +317,9 @@ public class LoopTelegram {
         return esperaAntesDeRepetir;
     }
 
-    // Seção 1: os filtros, NESTA ordem. Cada "return" é um update encerrado (o
-    // offset avança). SQLException sobe para tratarErroNoBanco.
+    // Seção 1 da 6a: os filtros, NESTA ordem; o passo 4 é a tabela de status da 6b.
+    // Cada "return" é um update encerrado (o offset avança). SQLException sobe
+    // para tratarErroNoBanco.
     private void atender(JsonNode update, Atendimento atendimento) throws SQLException, InterruptedException {
         // 1. Só mensagem nova ou editada interessa (o resto: entrada em grupo,
         //    bloqueio do bot etc.). O tipo vai para o log.
@@ -313,18 +349,55 @@ public class LoopTelegram {
             return;
         }
 
-        // 4. Só quem está ATIVO em TR_USUARIO. Em silêncio e sem gravar nada em
-        //    TR_MENSAGEM: o bot não conversa com desconhecidos nem guarda texto
-        //    de quem não aceitou o aviso de boas-vindas. (A 6b muda isso para
-        //    quem mandar /start.)
-        Optional<Usuario> remetente = usuarios.buscarPorIdTelegram(inteiro(from, "id"));
-        if (remetente.isEmpty() || !remetente.get().ativo()) {
-            atendimento.resultado = "ignorado: remetente não está ATIVO";
+        // Texto da mensagem NOVA. Lido antes do status porque o /start decide o
+        // caminho de quem ainda não está ATIVO. Edição fica sem texto de propósito:
+        // edição de "/start" não cadastra ninguém (edição nunca é processada).
+        String texto = edicao ? null : textoOpcional(mensagem, "text");
+        Comando comando = Comando.de(texto);
+        if (comando != null) {
+            // Texto que começa com "/" aparece como "comando" no log (6b). O
+            // argumento não: pode ser o ID_USUARIO do /aprovar.
+            atendimento.tipo = "comando";
+        }
+        boolean start = comando != null && START.equals(comando.nome());
+
+        // 4. Status do remetente (tabela da regra 2 da 6b). Uma busca só, e cada
+        //    status decide o resto. Nada daqui grava em TR_MENSAGEM: o bot não
+        //    guarda texto de quem não está ATIVO (não aceitou a boas-vindas ou
+        //    ainda não foi aprovado).
+        long idTelegram = inteiro(from, "id");
+        Optional<Usuario> remetente = usuarios.buscarPorIdTelegram(idTelegram);
+
+        if (remetente.isEmpty()) {
+            // Desconhecido: só o /start abre conversa. Qualquer outra coisa,
+            // silêncio: o bot não conversa com quem não pediu acesso.
+            if (!start) {
+                atendimento.resultado = "ignorado: remetente não cadastrado";
+                return;
+            }
+            cadastrar(mensagem, chat, from, idTelegram, atendimento);
             return;
         }
         Usuario usuario = remetente.get();
-        // A partir daqui o bot pode responder. chat.id e não from.id: é o
-        // endereço da conversa (no privado os dois coincidem).
+
+        if (PENDENTE.equals(usuario.status())) {
+            atenderPendente(usuario, edicao, start, chat, atendimento);
+            return;
+        }
+
+        if (!usuario.ativo()) {
+            // BLOQUEADO: silêncio total, inclusive no /start. Responder (nem que
+            // fosse "você está bloqueado") manteria uma conversa que o
+            // administrador decidiu encerrar. O CK_TR_USUARIO_STATUS só deixa
+            // PENDENTE, ATIVO e BLOQUEADO; um status estranho também cairia aqui,
+            // do lado seguro.
+            atendimento.resultado = "ignorado: remetente BLOQUEADO";
+            return;
+        }
+
+        // ATIVO: fluxo da 6a, passos 5 a 8, sem mudança (o /start dele cai no
+        // passo 7). A partir daqui o bot pode responder. chat.id e não from.id: é
+        // o endereço da conversa (no privado os dois coincidem).
         atendimento.chatId = inteiro(chat, "id");
 
         // 5. Edição não muda o registro: correção é sempre mensagem nova
@@ -338,7 +411,6 @@ public class LoopTelegram {
         // 6. Figurinha, foto, voz, documento ou texto em branco. Sem este filtro,
         //    "" chegaria ao service, viraria NULL no Oracle, a T1 daria ORA-01400
         //    e a fila de todos travaria nessa mensagem.
-        String texto = textoOpcional(mensagem, "text");
         if (texto == null || texto.isBlank()) {
             atendimento.resultado = "ignorado: sem texto";
             responder(atendimento, Textos.SO_ENTENDO_TEXTO);
@@ -347,15 +419,14 @@ public class LoopTelegram {
 
         // 7. Comando nunca vai para o extrator: não é relato de treino, e
         //    gastaria crédito à toa.
-        if (texto.startsWith("/")) {
-            tratarComando(atendimento);
+        if (comando != null) {
+            tratarComando(comando, idTelegram, atendimento);
             return;
         }
 
-        // 8. Relato. Data de ENVIO (campo date: epoch em segundos, UTC)
-        //    convertida para São Paulo, nunca a hora em que o Java leu: com o bot
-        //    parado, o treino de ontem chega hoje e tem que ir para ontem.
-        LocalDateTime envio = LocalDateTime.ofInstant(Instant.ofEpochSecond(inteiro(mensagem, "date")), SAO_PAULO);
+        // 8. Relato. Data de ENVIO (ver dataDeEnvio).
+        LocalDateTime envio = dataDeEnvio(mensagem);
+        atendimento.etapa = "ao gravar a mensagem";
         ResultadoRegistro resultado = registrador.registrar(usuario.idUsuario(), inteiro(mensagem, "message_id"),
                 envio, "TEXTO", texto);
 
@@ -369,20 +440,142 @@ public class LoopTelegram {
         }
     }
 
-    // Ponto único de roteamento de comandos. Na 6a não existe comando conhecido:
-    // tudo é "não reconhecido". A 6b acrescenta /start e /aprovar AQUI.
-    private void tratarComando(Atendimento atendimento) throws InterruptedException {
+    // Ponto único de roteamento dos comandos de quem está ATIVO (passo 7).
+    private void tratarComando(Comando comando, long idTelegram, Atendimento atendimento)
+            throws SQLException, InterruptedException {
+        if (START.equals(comando.nome())) {
+            atendimento.resultado = "start: já cadastrado";
+            responder(atendimento, Textos.JA_CADASTRADO);
+            return;
+        }
+        if (APROVAR.equals(comando.nome())) {
+            // Só do administrador, conferido pelo from.id (o mesmo id que o
+            // Telegram autentica; não dá para forjar dentro do chat). De qualquer
+            // outro, a MESMA resposta de um comando que não existe: o bot não
+            // revela que há um comando de administração. O log diz o que houve.
+            if (idTelegram != idAdministrador) {
+                atendimento.resultado = "aprovar: remetente não é o admin";
+                responder(atendimento, Textos.COMANDO_NAO_RECONHECIDO);
+                return;
+            }
+            aprovar(comando.argumento(), atendimento);
+            return;
+        }
         atendimento.resultado = "ignorado: comando não reconhecido";
         responder(atendimento, Textos.COMANDO_NAO_RECONHECIDO);
     }
 
+    // --- 6b: cadastro e aprovação ----------------------------------------------------------
+
+    // /start de quem não existe em TR_USUARIO (regras 1, 3 e 4 da 6b).
+    private void cadastrar(JsonNode mensagem, JsonNode chat, JsonNode from, long idTelegram,
+            Atendimento atendimento) throws SQLException, InterruptedException {
+        // Nome e data lidos ANTES de liberar a resposta: first_name ausente, em
+        // branco ou longo demais é update fora do contrato do Telegram e cai no erro
+        // inesperado SEM resposta (o bot ainda não decidiu falar com essa pessoa).
+        String nome = primeiroNome(from);
+        LocalDateTime envio = dataDeEnvio(mensagem);
+
+        // Caminho do /start: daqui em diante o bot pode responder a este
+        // desconhecido, inclusive com o aviso de erro se o banco falhar abaixo.
+        atendimento.chatId = inteiro(chat, "id");
+        atendimento.etapa = "ao cadastrar";
+        // O service comita ANTES de qualquer envio: o bot só diz "pedido enviado"
+        // (e só avisa o admin) depois que o cadastro está gravado.
+        long idUsuario = cadastro.cadastrarPendente(idTelegram, nome, envio);
+
+        atendimento.resultado = "start: cadastrado PENDENTE";
+        responder(atendimento, Textos.BOAS_VINDAS);
+        avisarAdmin(nome, idUsuario, atendimento);
+    }
+
+    // Remetente PENDENTE (tabela da regra 2 da 6b).
+    private void atenderPendente(Usuario usuario, boolean edicao, boolean start, JsonNode chat,
+            Atendimento atendimento) throws InterruptedException {
+        // Edição: silêncio. Já houve (ou haverá) uma resposta para a mensagem
+        // original; responder de novo a cada edição seria só ruído.
+        if (edicao) {
+            atendimento.resultado = "ignorado: edição de remetente PENDENTE";
+            return;
+        }
+        atendimento.chatId = inteiro(chat, "id");
+
+        if (start) {
+            // /start de quem já está PENDENTE REAVISA o admin. Dois motivos: (1) se
+            // o bot caiu depois de gravar o cadastro e antes de avisar, a reentrega
+            // do Telegram encontra o usuário já PENDENTE, e sem o reaviso o
+            // primeiro aviso se perderia de vez; (2) o amigo impaciente que manda
+            // /start de novo serve de lembrete.
+            atendimento.resultado = "start: já PENDENTE, admin reavisado";
+            responder(atendimento, Textos.AGUARDANDO_APROVACAO);
+            // Nome gravado no cadastro (não o first_name de agora): é o mesmo que
+            // o admin vai ver no "aprovado: <nome>" e no banco.
+            avisarAdmin(usuario.nome(), usuario.idUsuario(), atendimento);
+            return;
+        }
+
+        // Texto, figurinha, outros comandos (inclusive /aprovar): nada é
+        // processado nem gravado; só o lembrete de que falta a aprovação.
+        atendimento.resultado = "ignorado: remetente PENDENTE";
+        responder(atendimento, Textos.AGUARDANDO_APROVACAO);
+    }
+
+    // Aviso de novo pedido, no chat do administrador. Leva o ID_USUARIO interno (é
+    // o número que o /aprovar recebe), nunca o from.id. Nome e id vão só para esse
+    // chat, nunca para o log. Falha no envio: a regra de envio da 6a (uma nova
+    // tentativa, depois desiste e avança); o log registra.
+    private void avisarAdmin(String nome, long idUsuario, Atendimento atendimento) throws InterruptedException {
+        enviar(idAdministrador, Textos.AVISO_ADMIN.formatted(nome, idUsuario), "aviso ao admin não enviado",
+                atendimento);
+    }
+
+    // /aprovar <ID_USUARIO> do administrador (regra 5 da 6b).
+    private void aprovar(String argumento, Atendimento atendimento) throws SQLException, InterruptedException {
+        Long idUsuario = idDoArgumento(argumento);
+        if (idUsuario == null) {
+            atendimento.resultado = "aprovar: uso";
+            responder(atendimento, Textos.USO_APROVAR);
+            return;
+        }
+
+        atendimento.etapa = "ao aprovar";
+        ResultadoAprovacao aprovacao = cadastro.aprovar(idUsuario);
+        switch (aprovacao.situacao()) {
+            case INEXISTENTE -> {
+                atendimento.resultado = "aprovar: id inexistente";
+                responder(atendimento, Textos.ID_INEXISTENTE);
+            }
+            case JA_ATIVO -> {
+                atendimento.resultado = "aprovar: já ativo";
+                responder(atendimento, Textos.JA_ATIVO);
+            }
+            case BLOQUEADO -> {
+                atendimento.resultado = "aprovar: bloqueado";
+                responder(atendimento, Textos.USUARIO_BLOQUEADO);
+            }
+            case APROVADO -> {
+                atendimento.resultado = "aprovar: aprovado";
+                responder(atendimento, Textos.APROVADO.formatted(aprovacao.nome()));
+                // Avisa quem foi aprovado, no chat dele (no privado, chat id =
+                // ID_TELEGRAM). Se ele bloqueou o bot (403), o admin já recebeu o
+                // "aprovado" e o log registra a falha: sem regra nova.
+                enviar(aprovacao.idTelegram(), Textos.ACESSO_LIBERADO, "aviso ao aprovado não enviado",
+                        atendimento);
+            }
+        }
+    }
+
     // --- Seção 2: SQLException antes de a mensagem estar salva ------------------------
 
-    // Vale para a busca do remetente e para a T1 do registrar (as únicas que
-    // sobem SQLException: depois da T1, o service devolve NAO_REGISTRADO).
+    // Vale para a busca do remetente, a T1 do registrar (depois da T1, o service
+    // devolve NAO_REGISTRADO em vez de exceção) e, desde a 6b, o cadastro do
+    // /start e o /aprovar. Nos dois últimos, nada foi comitado (o service desfez):
+    // repetir o update é seguro.
+    // A resposta de erro só sai se o bot já podia falar com o remetente (chatId):
+    // na busca, não; no cadastro, sim (caminho do /start); no /aprovar, é o admin.
     private Duration tratarErroNoBanco(SQLException e, long updateId, Atendimento atendimento)
             throws InterruptedException {
-        String onde = atendimento.chatId == null ? "ao buscar o remetente" : "ao gravar a mensagem";
+        String onde = atendimento.etapa;
         String codigo = codigoOra(e);
 
         if (recusaDoBanco(e)) {
@@ -414,7 +607,8 @@ public class LoopTelegram {
     // ar) pode passar sozinha: aí vale esperar e repetir.
     // ATENÇÃO (relatório da 6a): o driver lança ORA-12899 (texto grande demais)
     // como SQLException genérica, fora desta lista. Hoje ele não chega aqui (a T1
-    // não grava coluna limitada com texto do usuário); se chegar, cai no teto.
+    // não grava coluna limitada com texto do usuário; o NOME do cadastro é
+    // conferido antes, em primeiroNome); se chegar, cai no teto.
     private static boolean recusaDoBanco(SQLException e) {
         return e instanceof SQLIntegrityConstraintViolationException
                 || e instanceof SQLDataException
@@ -431,26 +625,38 @@ public class LoopTelegram {
 
     // --- Seção 10: envio --------------------------------------------------------------
 
-    // Uma nova tentativa, 2 s depois, e desiste: o dado já está no banco, então
+    // Regra de envio (em enviar, vale para a resposta e para os avisos da 6b): uma
+    // nova tentativa, 2 s depois, e desiste: o dado já está no banco, então
     // travar a fila por causa da resposta não vale a pena. 403 = o usuário
     // bloqueou o bot: tentar de novo dá 403 de novo.
     //
     // Nunca lança RuntimeException: o envio é o último passo. Uma falha aqui,
-    // de qualquer tipo, vira "resposta não enviada" no log. Se escapasse, cairia
+    // de qualquer tipo, vira "... não enviada/o" no log. Se escapasse, cairia
     // no catch de erro inesperado, que tentaria responder de novo, e um erro
     // dentro de um catch derrubaria o loop.
     private void responder(Atendimento atendimento, String texto) throws InterruptedException {
-        // Só responde a remetente confirmado ATIVO. Erro antes dessa confirmação
-        // (banco fora do ar na busca, JSON estranho) fica sem resposta: o bot não
-        // fala com quem não sabe se pode.
+        // A TRAVA, num ponto só: só responde quando o chatId foi preenchido (ver
+        // Atendimento). Erro antes disso (banco fora do ar na busca, JSON
+        // estranho, first_name inválido) fica sem resposta: o bot não fala com
+        // quem não sabe se pode.
         if (atendimento.chatId == null) {
             return;
         }
+        enviar(atendimento.chatId, texto, "resposta não enviada", atendimento);
+    }
+
+    // Envio para um chat qualquer: a resposta ao remetente (via responder) e os
+    // avisos da 6b, que vão para OUTRO chat (o do admin, o do aprovado) e por isso
+    // não passam pela trava do chatId. Os destinos dos avisos vêm do banco ou da
+    // variável de ambiente, nunca do update.
+    // falhaNoLog: o que a linha de log diz se o envio não chegar.
+    private void enviar(long chatId, String texto, String falhaNoLog, Atendimento atendimento)
+            throws InterruptedException {
         for (int tentativa = 1; ; tentativa++) {
             String falha;
             boolean valeRepetir = true;
             try {
-                telegram.enviarMensagem(atendimento.chatId, texto);
+                telegram.enviarMensagem(chatId, texto);
                 return;
             } catch (ErroTelegram e) {
                 falha = "HTTP " + e.status();
@@ -461,7 +667,7 @@ public class LoopTelegram {
                 falha = e.getClass().getSimpleName();
             }
             if (!valeRepetir || tentativa >= TENTATIVAS_DE_ENVIO) {
-                atendimento.falhaNoEnvio = falha;
+                atendimento.falhasNoEnvio.add(falhaNoLog + " (" + falha + ")");
                 return;
             }
             espera.esperar(ESPERA_REENVIO);
@@ -506,6 +712,74 @@ public class LoopTelegram {
         return valor.stringValue();
     }
 
+    // Regra 1 da 6b: o nome gravado é o first_name do /start. O bot NÃO pergunta
+    // o nome: perguntar criaria estado de conversa ("a próxima mensagem é o nome
+    // ou um treino?"), guardado em memória e perdido quando o bot reinicia. O nome
+    // só serve para o administrador reconhecer quem pediu acesso.
+    // Obrigatório (required + texto). Ausente, em branco ou com mais de 100
+    // caracteres = update fora do contrato do Telegram -> IllegalArgumentException
+    // (erro inesperado). NUNCA trunca: gravar meio nome seria inventar um nome.
+    // codePointCount e não length(): o VARCHAR2(n CHAR) conta um emoji como 1
+    // caractere; length() contaria 2 (par substituto do UTF-16).
+    // A mensagem da exceção cita só o campo, nunca o valor.
+    private static String primeiroNome(JsonNode from) {
+        String nome = texto(from, "first_name");
+        if (nome.isBlank()) {
+            throw new IllegalArgumentException("Campo \"first_name\" do update está em branco.");
+        }
+        if (nome.codePointCount(0, nome.length()) > MAX_NOME) {
+            throw new IllegalArgumentException("Campo \"first_name\" do update passa de " + MAX_NOME + " caracteres.");
+        }
+        return nome;
+    }
+
+    // Data de ENVIO (campo date: epoch em segundos, UTC) convertida para São
+    // Paulo, nunca a hora em que o Java leu: com o bot parado, o treino de ontem
+    // chega hoje e tem que ir para ontem. A 6b usa a mesma regra no DATA_CADASTRO.
+    private static LocalDateTime dataDeEnvio(JsonNode mensagem) {
+        return LocalDateTime.ofInstant(Instant.ofEpochSecond(inteiro(mensagem, "date")), SAO_PAULO);
+    }
+
+    // Argumento do /aprovar -> ID_USUARIO; null = "uso: /aprovar <id>" (ausente,
+    // não numérico, zero). Negativo já cai fora do padrão (o "-" não é dígito).
+    // Zero passa no padrão, mas não é id: o IDENTITY começa em 1.
+    private static Long idDoArgumento(String argumento) {
+        if (!ID_NO_ARGUMENTO.matcher(argumento).matches()) {
+            return null;
+        }
+        long id = Long.parseLong(argumento);
+        return id > 0 ? id : null;
+    }
+
+    /**
+     * Um texto que começa com "/", separado em nome e argumento (6b).
+     * "/aprovar@MeuBot 3" -> nome "/aprovar", argumento "3".
+     *
+     * Só o PRIMEIRO token decide o comando. O "@nome_do_bot" é tirado: é o que o
+     * Telegram põe quando a pessoa toca no comando numa lista (e o que se usa em
+     * grupo). Também por isso "/start site" (o link t.me/bot?start=site do site
+     * estático) continua sendo /start.
+     *
+     * Cuidado: o argumento pode ser um ID_USUARIO; nunca imprimir um Comando.
+     *
+     * @param argumento o resto do texto, sem espaços nas pontas; "" se não houver
+     */
+    private record Comando(String nome, String argumento) {
+
+        /** null = o texto não é comando (null ou não começa com "/"). */
+        static Comando de(String texto) {
+            if (texto == null || !texto.startsWith("/")) {
+                return null;
+            }
+            String[] partes = texto.split("\\s+", 2);
+            String token = partes[0];
+            int arroba = token.indexOf('@');
+            String nome = arroba < 0 ? token : token.substring(0, arroba);
+            String argumento = partes.length > 1 ? partes[1].strip() : "";
+            return new Comando(nome, argumento);
+        }
+    }
+
     // Nome do campo que o Telegram mandou (my_chat_member, callback_query...).
     // É nome de campo da API, não conteúdo.
     private static String tipoDoUpdate(JsonNode update) {
@@ -529,9 +803,12 @@ public class LoopTelegram {
     // --- Log --------------------------------------------------------------------------
 
     // "09/10 10:02:15 | update 418230551 | texto | REGISTRADO | 2,4 s"
+    // Com falha de envio: "... | start: cadastrado PENDENTE; aviso ao admin não enviado (HTTP 500) | ..."
     private void logarUpdate(Instant inicio, long updateId, Atendimento atendimento) {
-        String resultado = atendimento.resultado
-                + (atendimento.falhaNoEnvio == null ? "" : "; resposta não enviada (" + atendimento.falhaNoEnvio + ")");
+        StringBuilder resultado = new StringBuilder(atendimento.resultado);
+        for (String falha : atendimento.falhasNoEnvio) {
+            resultado.append("; ").append(falha);
+        }
         double segundos = Duration.between(inicio, relogio.instant()).toMillis() / 1000.0;
         log.accept(FORMATO_LOG.format(inicio) + " | update " + updateId + " | " + atendimento.tipo
                 + " | " + resultado + " | " + String.format(PT_BR, "%.1f s", segundos));

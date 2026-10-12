@@ -1,7 +1,7 @@
 package dev.vitorrodrigues.treino.bot;
 
 /**
- * Todas as frases que o usuário lê no chat, num lugar só (fatia 6a).
+ * Todas as frases que o usuário lê no chat, num lugar só (fatias 6a e 6b).
  *
  * Todas PROVISÓRIAS: o Vitor reescreve antes do teste com amigos (o texto que
  * vai para os amigos não se delega). Com elas aqui, reescrever é editar um
@@ -79,4 +79,54 @@ public final class Textos {
 
     // PROVISÓRIO
     public static final String SEM_FALHA = "(sem falha)";
+
+    // --- Cadastro (fatia 6b) -------------------------------------------------------------
+
+    // PROVISÓRIO. Resposta ao /start de quem ainda não está cadastrado.
+    // OBRIGATÓRIO, mesmo reescrita (é a condição para usar o banco da FIAP): os
+    // quatro pontos do escopo. (1) o bot grava o texto das mensagens e os treinos
+    // extraídos; (2) os dados ficam num banco de estudo da faculdade; (3) dá para
+    // pedir para apagar tudo a qualquer momento, falando com o administrador;
+    // (4) o acesso depende de aprovação.
+    public static final String BOAS_VINDAS = String.join("\n",
+            "Olá! Eu registro treinos a partir do que você me conta por mensagem.",
+            "",
+            "Antes de começar, saiba que:",
+            "- eu gravo o texto das suas mensagens e os treinos que extraio delas;",
+            "- esses dados ficam num banco de dados de estudo da faculdade;",
+            "- você pode pedir para apagar tudo a qualquer momento, é só falar com o administrador;",
+            "- o acesso depende de aprovação do administrador.",
+            "",
+            "Seu pedido foi enviado. Eu aviso aqui quando o acesso for liberado.");
+
+    // PROVISÓRIO. Qualquer mensagem de quem está PENDENTE (inclusive um novo /start).
+    public static final String AGUARDANDO_APROVACAO =
+            "Seu pedido de acesso está aguardando aprovação. Eu aviso aqui quando for liberado.";
+
+    // PROVISÓRIO. /start de quem já está ATIVO.
+    public static final String JA_CADASTRADO = "Você já está cadastrado. Pode mandar seu treino.";
+
+    // PROVISÓRIO. Vai só para o chat do administrador. %1$s = first_name,
+    // %2$d = ID_USUARIO interno (nunca o from.id).
+    public static final String AVISO_ADMIN = "Novo pedido de acesso: %1$s (id %2$d).\nPara aprovar: /aprovar %2$d";
+
+    // --- /aprovar (fatia 6b; só o administrador lê) ---------------------------------------
+
+    // PROVISÓRIO
+    public static final String USO_APROVAR = "Uso: /aprovar <id>";
+
+    // PROVISÓRIO
+    public static final String ID_INEXISTENTE = "Não existe usuário com esse id.";
+
+    // PROVISÓRIO
+    public static final String JA_ATIVO = "Esse usuário já está ativo.";
+
+    // PROVISÓRIO
+    public static final String USUARIO_BLOQUEADO = "Esse usuário está bloqueado; desbloqueie pelo banco.";
+
+    // PROVISÓRIO. %s = nome gravado em TR_USUARIO.
+    public static final String APROVADO = "Aprovado: %s.";
+
+    // PROVISÓRIO. Vai para o chat de quem foi aprovado.
+    public static final String ACESSO_LIBERADO = "Seu acesso foi liberado. Pode mandar seu treino.";
 }

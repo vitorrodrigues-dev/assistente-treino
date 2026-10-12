@@ -26,6 +26,12 @@ public class UsuarioDAO {
              WHERE ID_TELEGRAM = ?
             """;
 
+    private static final String SQL_BUSCAR_POR_ID = """
+            SELECT ID_USUARIO, ID_TELEGRAM, NOME, STATUS, DATA_CADASTRO
+              FROM TR_USUARIO
+             WHERE ID_USUARIO = ?
+            """;
+
     // Status fixo no SQL: este método só serve para o cadastro pelo /start.
     // Quem entra ATIVO direto é só o administrador, pelo 04-usuario.sql.
     private static final String SQL_INSERIR_PENDENTE = """
@@ -51,16 +57,39 @@ public class UsuarioDAO {
                 if (!rs.next()) {
                     return Optional.empty();
                 }
-                return Optional.of(new Usuario(
-                        rs.getLong("ID_USUARIO"),
-                        rs.getLong("ID_TELEGRAM"),
-                        rs.getString("NOME"),
-                        rs.getString("STATUS"),
-                        // getObject(..., LocalDateTime.class): o driver converte o
-                        // TIMESTAMP direto, sem passar por java.sql.Timestamp.
-                        rs.getObject("DATA_CADASTRO", LocalDateTime.class)));
+                return Optional.of(usuarioDaLinha(rs));
             }
         }
+    }
+
+    /**
+     * Usuário pelo id interno (ID_USUARIO), o número que o /aprovar recebe
+     * (fatia 6b). Vazio = não existe usuário com esse id.
+     */
+    public Optional<Usuario> buscarPorId(Connection conn, long idUsuario) throws SQLException {
+        try (PreparedStatement ps = conn.prepareStatement(SQL_BUSCAR_POR_ID)) {
+            ps.setLong(1, idUsuario);
+
+            try (ResultSet rs = ps.executeQuery()) {
+                // PK_TR_USUARIO garante no máximo uma linha.
+                if (!rs.next()) {
+                    return Optional.empty();
+                }
+                return Optional.of(usuarioDaLinha(rs));
+            }
+        }
+    }
+
+    // As duas buscas leem as mesmas colunas: o mapeamento fica num lugar só.
+    private static Usuario usuarioDaLinha(ResultSet rs) throws SQLException {
+        return new Usuario(
+                rs.getLong("ID_USUARIO"),
+                rs.getLong("ID_TELEGRAM"),
+                rs.getString("NOME"),
+                rs.getString("STATUS"),
+                // getObject(..., LocalDateTime.class): o driver converte o
+                // TIMESTAMP direto, sem passar por java.sql.Timestamp.
+                rs.getObject("DATA_CADASTRO", LocalDateTime.class));
     }
 
     /**
