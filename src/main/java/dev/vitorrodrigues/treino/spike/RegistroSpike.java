@@ -22,6 +22,7 @@ import dev.vitorrodrigues.treino.modelo.ExercicioComApelidos;
 import dev.vitorrodrigues.treino.modelo.ResultadoRegistro;
 import dev.vitorrodrigues.treino.modelo.ResultadoRegistro.SerieGravada;
 import dev.vitorrodrigues.treino.modelo.ResultadoRegistro.Situacao;
+import dev.vitorrodrigues.treino.modelo.ResultadoRegistro.TipoFalha;
 import dev.vitorrodrigues.treino.service.RegistroService;
 
 /**
@@ -38,7 +39,7 @@ import dev.vitorrodrigues.treino.service.RegistroService;
  * números, ids e o motivo (que, por contrato, não tem texto do usuário).
  *
  * Modos:
- * - sem argumento (ANTHROPIC_API_KEY válida): B, C, D, E, E2, F, G, H1 e H2.
+ * - sem argumento (ANTHROPIC_API_KEY válida): B, C, D, E, E2, F, G, H1, H2, I1, I2, I3, J1 e J2.
  *   1 chamada paga à API (B; o C prova que não houve a segunda).
  * - "chave-errada" (rodar com ANTHROPIC_API_KEY inválida): A.
  *
@@ -65,6 +66,11 @@ public class RegistroSpike {
     private static final long MSG_A = 7L;
     private static final long MSG_H1 = 8L;
     private static final long MSG_H2 = 9L;
+    private static final long MSG_I1 = 10L;
+    private static final long MSG_I2 = 11L;
+    private static final long MSG_I3 = 12L;
+    private static final long MSG_J1 = 13L;
+    private static final long MSG_J2 = 14L;
 
     // Relato real (escrito para o teste). "academia lotada, dormi mal" é a
     // observação do dia que o D espera encontrar; "rosca martelo" não está no
@@ -244,6 +250,7 @@ public class RegistroSpike {
         imprimir(d);
         conferir("D: situação REGISTRADO, lista de séries vazia",
                 d.situacao() == Situacao.REGISTRADO && d.series().isEmpty());
+        conferir("D: observacaoAnotada = true", d.observacaoAnotada());
         Long sessaoD = idSessaoDaMensagem(conn, idUsuario, MSG_D);
         conferir("D: mensagem na MESMA ID_SESSAO do B", sessaoB != null && sessaoB.equals(sessaoD));
         conferir("D: continua 1 sessão só nessa data", contar(conn, SQL_SESSOES_NA_DATA, idUsuario, hoje) == 1);
@@ -265,6 +272,7 @@ public class RegistroSpike {
                 new RelatoExtraido(null, List.of(serie(nomeLongo, null, 1, 20.0)), null));
         imprimir(e);
         conferir("E: situação NAO_REGISTRADO", e.situacao() == Situacao.NAO_REGISTRADO);
+        conferir("E: tipoFalha OUTRA", e.tipoFalha() == TipoFalha.OUTRA);
         conferir("E: motivo cita o campo exercicio_relatado",
                 e.motivo() != null && e.motivo().contains("exercicio_relatado"));
         conferir("E: motivo não repete o texto da série", e.motivo() != null && !e.motivo().contains("xxxxx"));
@@ -278,6 +286,7 @@ public class RegistroSpike {
                 new RelatoExtraido(null, List.of(serie("supino", "Supino reto barra", 1, 22.333)), null));
         imprimir(e2);
         conferir("E2: situação NAO_REGISTRADO", e2.situacao() == Situacao.NAO_REGISTRADO);
+        conferir("E2: tipoFalha OUTRA", e2.tipoFalha() == TipoFalha.OUTRA);
         conferir("E2: motivo cita o campo carga_kg", e2.motivo() != null && e2.motivo().contains("carga_kg"));
         conferirSoMensagemCrua("E2", conn, idUsuario, MSG_E2, envioE2.toLocalDate());
 
@@ -306,6 +315,7 @@ public class RegistroSpike {
                 serie("exercício do teste", inexistente, 2, 10.0)), null));
         imprimir(g);
         conferir("G: situação REGISTRADO", g.situacao() == Situacao.REGISTRADO);
+        conferir("G: observacaoAnotada = false (relato sem observação)", !g.observacaoAnotada());
         long idSupinoReto = idDoExercicio(conn, "Supino reto barra");
         conferir("G: oficial com ID_EXERCICIO preenchido",
                 contar(conn, SQL_SERIES_COM_EXERCICIO, idUsuario, MSG_G, idSupinoReto) == 1);
@@ -344,6 +354,93 @@ public class RegistroSpike {
                 observacaoAntesH2 != null && observacaoAntesH2.equals(observacaoDaSessao(conn, sessaoB)));
         conferir("H2: percepção \"   \" gravada como NULL",
                 contar(conn, SQL_SERIES_SEM_PERCEPCAO, idUsuario, MSG_H2) == 1);
+
+        // --- I (fatia 6a: observação do dia acumulada passa de 1000) --------------
+        // Cada observação cabe sozinha (600 e 500); a soma com a quebra de linha
+        // (1101) não cabe no VARCHAR2(1000 CHAR). Texto só com "o" e "p": 1 byte
+        // por caractere, longe do limite de 4000 bytes da concatenação no Oracle.
+        System.out.println();
+        System.out.println("=== I1. 1ª mensagem do dia, observação de 600 caracteres (extrator falso, data nova) ===");
+        LocalDateTime envioI = agora.minusDays(6);
+        String observacao600 = "o".repeat(600);
+        ResultadoRegistro i1 = registrarComFalso(idUsuario, MSG_I1, envioI, new RelatoExtraido(observacao600,
+                List.of(serie("supino", "Supino reto barra", 1, 20.0)), null));
+        imprimir(i1);
+        conferir("I1: situação REGISTRADO", i1.situacao() == Situacao.REGISTRADO);
+        Long sessaoI = idSessaoDaMensagem(conn, idUsuario, MSG_I1);
+
+        System.out.println();
+        System.out.println("=== I2. 2ª mensagem do mesmo dia, mais 500 caracteres de observação ===");
+        ResultadoRegistro i2 = registrarComFalso(idUsuario, MSG_I2, envioI, new RelatoExtraido("p".repeat(500),
+                List.of(serie("supino", "Supino reto barra", 2, 20.0)), null));
+        imprimir(i2);
+        conferir("I2: situação NAO_REGISTRADO", i2.situacao() == Situacao.NAO_REGISTRADO);
+        conferir("I2: tipoFalha OBSERVACAO_CHEIA", i2.tipoFalha() == TipoFalha.OBSERVACAO_CHEIA);
+        conferir("I2: mensagem crua gravada", contar(conn, SQL_MENSAGEM_EXISTE, idUsuario, MSG_I2) == 1);
+        conferir("I2: mensagem com ID_SESSAO NULL", idSessaoDaMensagem(conn, idUsuario, MSG_I2) == null);
+        conferir("I2: 0 séries gravadas da 2ª mensagem",
+                contar(conn, SQL_SERIES_DA_MENSAGEM, idUsuario, MSG_I2) == 0);
+        conferir("I2: OBSERVACAO da sessão continua só a da 1ª (rollback da T2)",
+                sessaoI != null && observacao600.equals(observacaoDaSessao(conn, sessaoI)));
+        conferir("I2: continua 1 sessão nessa data",
+                contar(conn, SQL_SESSOES_NA_DATA, idUsuario, envioI.toLocalDate()) == 1);
+
+        // Uma mensagem só, com observação acima do limite: é recusada na validação,
+        // antes da T2. Reenviar uma observação menor resolve, por isso é OUTRA.
+        System.out.println();
+        System.out.println("=== I3. Uma mensagem só, observação de 1001 caracteres (extrator falso, data nova) ===");
+        LocalDateTime envioI3 = agora.minusDays(7);
+        ResultadoRegistro i3 = registrarComFalso(idUsuario, MSG_I3, envioI3,
+                new RelatoExtraido("q".repeat(1001), List.of(), null));
+        imprimir(i3);
+        conferir("I3: NAO_REGISTRADO com tipoFalha OUTRA (recusada na validação)",
+                i3.situacao() == Situacao.NAO_REGISTRADO && i3.tipoFalha() == TipoFalha.OUTRA);
+        conferir("I3: 0 sessões nessa data",
+                contar(conn, SQL_SESSOES_NA_DATA, idUsuario, envioI3.toLocalDate()) == 0);
+
+        // --- J (fatia 6a: o mesmo caso do I, mas com muitos bytes -> ORA-01489) ---
+        // 💪 ocupa 4 bytes em UTF-8 e conta 1 caractere. 600 + quebra de linha +
+        // 500 = 1101 caracteres e 2400 + 1 + 2000 = 4401 bytes: a concatenação do
+        // acrescentarObservacao passa de 4000 bytes, e o Oracle deve recusar a
+        // concatenação (01489) antes de comparar com a coluna (12899). Cada
+        // mensagem cabe sozinha (600 e 500 caracteres; 2400 e 2000 bytes).
+        System.out.println();
+        System.out.println("=== J1. 1ª mensagem do dia, observação de 600 emojis (extrator falso, data nova) ===");
+        LocalDateTime envioJ = agora.minusDays(8);
+        String emojis600 = "💪".repeat(600);
+        ResultadoRegistro j1 = registrarComFalso(idUsuario, MSG_J1, envioJ, new RelatoExtraido(emojis600,
+                List.of(serie("supino", "Supino reto barra", 1, 20.0)), null));
+        imprimir(j1);
+        conferir("J1: situação REGISTRADO", j1.situacao() == Situacao.REGISTRADO);
+        Long sessaoJ = idSessaoDaMensagem(conn, idUsuario, MSG_J1);
+        // Pré-condição: se o banco não guardasse caracteres de 4 bytes, o emoji
+        // viraria "?" (1 byte) e o J2 nunca chegaria a 4000 bytes.
+        conferir("J1: observação com emoji voltou do banco igual (pré-condição do J2)",
+                sessaoJ != null && emojis600.equals(observacaoDaSessao(conn, sessaoJ)));
+
+        System.out.println();
+        System.out.println("=== J2. 2ª mensagem do mesmo dia, mais 500 emojis de observação ===");
+        ResultadoRegistro j2 = registrarComFalso(idUsuario, MSG_J2, envioJ, new RelatoExtraido("💪".repeat(500),
+                List.of(serie("supino", "Supino reto barra", 2, 20.0)), null));
+        imprimir(j2);
+        conferir("J2: situação NAO_REGISTRADO", j2.situacao() == Situacao.NAO_REGISTRADO);
+        conferir("J2: tipoFalha OBSERVACAO_CHEIA", j2.tipoFalha() == TipoFalha.OBSERVACAO_CHEIA);
+        // O motivo é o único lugar com o código que o Oracle devolveu. Ler o
+        // motivo aqui é só conferência: o bot nunca decide por ele.
+        boolean veio01489 = j2.motivo() != null && j2.motivo().contains("ORA-01489");
+        conferir("J2: o Oracle devolveu ORA-01489 (e não ORA-12899)", veio01489);
+        if (!veio01489 && j2.motivo() != null && j2.motivo().contains("ORA-12899")) {
+            System.out.println("        veio ORA-12899: o banco provavelmente está com MAX_STRING_SIZE = EXTENDED"
+                    + " (concatenação até 32767 bytes). Anotar no relatório, não forçar.");
+        }
+        conferir("J2: mensagem crua gravada", contar(conn, SQL_MENSAGEM_EXISTE, idUsuario, MSG_J2) == 1);
+        conferir("J2: mensagem com ID_SESSAO NULL", idSessaoDaMensagem(conn, idUsuario, MSG_J2) == null);
+        conferir("J2: 0 séries gravadas da 2ª mensagem",
+                contar(conn, SQL_SERIES_DA_MENSAGEM, idUsuario, MSG_J2) == 0);
+        conferir("J2: OBSERVACAO da sessão continua só a da 1ª (rollback da T2)",
+                sessaoJ != null && emojis600.equals(observacaoDaSessao(conn, sessaoJ)));
+        conferir("J2: continua 1 sessão nessa data",
+                contar(conn, SQL_SESSOES_NA_DATA, idUsuario, envioJ.toLocalDate()) == 1);
     }
 
     // --- Modo chave-errada --------------------------------------------------------------
@@ -356,6 +453,7 @@ public class RegistroSpike {
                 .registrar(idUsuario, MSG_A, agora, "TEXTO", RELATO_REAL);
         imprimir(a);
         conferir("A: situação NAO_REGISTRADO", a.situacao() == Situacao.NAO_REGISTRADO);
+        conferir("A: tipoFalha OUTRA", a.tipoFalha() == TipoFalha.OUTRA);
         conferir("A: a API foi chamada (1 vez) e recusou", extratorReal.chamadas() == 1);
         conferir("A: 1 mensagem do usuário de teste", contar(conn, SQL_MENSAGENS_DO_USUARIO, idUsuario) == 1);
         conferir("A: mensagem com ID_SESSAO NULL",
@@ -438,6 +536,7 @@ public class RegistroSpike {
     private static void imprimir(ResultadoRegistro r) {
         System.out.println("        situação=" + r.situacao() + " data=" + r.dataSessao()
                 + " séries=" + r.series().size() + " dúvidas=" + r.duvidas().size()
+                + (r.tipoFalha() == null ? "" : " tipoFalha=" + r.tipoFalha())
                 + (r.motivo() == null ? "" : " motivo=" + r.motivo()));
         for (SerieGravada s : r.series()) {
             System.out.println("          série " + s.serie().numeroSerie() + ": carga=" + s.serie().cargaKg()

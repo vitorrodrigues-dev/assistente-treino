@@ -26,6 +26,7 @@ import dev.vitorrodrigues.treino.modelo.ExercicioComApelidos;
 import dev.vitorrodrigues.treino.modelo.ResultadoInsercao;
 import dev.vitorrodrigues.treino.modelo.ResultadoRegistro;
 import dev.vitorrodrigues.treino.modelo.ResultadoRegistro.SerieGravada;
+import dev.vitorrodrigues.treino.modelo.ResultadoRegistro.TipoFalha;
 
 /**
  * Um relato em texto vira linhas no banco:
@@ -52,7 +53,12 @@ import dev.vitorrodrigues.treino.modelo.ResultadoRegistro.SerieGravada;
  * Nada aqui é impresso nem vai para mensagem de exceção: nem o texto, nem o id do
  * Telegram, nem a resposta do modelo.
  */
-public class RegistroService {
+public class RegistroService implements Registrador {
+
+    // ORA-12899: valor grande demais para a coluna.
+    private static final int ORA_VALOR_GRANDE_DEMAIS = 12899;
+    // ORA-01489: resultado da concatenação de texto grande demais (mais de 4000 bytes).
+    private static final int ORA_CONCATENACAO_LONGA_DEMAIS = 1489;
 
     // Limites espelhados do DDL (01-ddl.sql). Conferir aqui, antes da T2, dá um
     // motivo legível ("series[0].carga_kg com mais de 2 casas decimais") em vez de
@@ -90,6 +96,10 @@ public class RegistroService {
      * passar do VARCHAR2(1000 CHAR). Aí o Oracle recusa (ORA-12899), a T2 desfaz
      * tudo e a mensagem inteira vira NAO_REGISTRADO, séries inclusive; só a
      * mensagem crua fica. O texto do usuário não é cortado em lugar nenhum.
+     * Desde a fatia 6a esse caso sai com TipoFalha.OBSERVACAO_CHEIA, para o bot
+     * pedir "só as séries, sem observação" em vez de "reenvie com outras palavras".
+     * Com acento ou emoji, o Oracle recusa com ORA-01489 em vez do 12899 (ver
+     * gravarSessaoESeries); os dois viram OBSERVACAO_CHEIA.
      *
      * @param idUsuario     ID_USUARIO interno (não o from.id). Filtrar quem está
      *                      ATIVO é papel da fatia 6, antes de chamar este método.
@@ -102,6 +112,7 @@ public class RegistroService {
      * @throws InterruptedException se a thread foi interrompida durante a chamada
      *         à API. A mensagem crua já está gravada, sem sessão.
      */
+    @Override
     public ResultadoRegistro registrar(long idUsuario, long idTelegram, LocalDateTime dataHoraEnvio,
             String origem, String texto) throws SQLException, InterruptedException {
 
@@ -126,7 +137,8 @@ public class RegistroService {
         try {
             catalogo = exercicioDAO.listarComApelidos(idUsuario);
         } catch (SQLException e) {
-            return ResultadoRegistro.naoRegistrado(data, "catálogo: erro no banco (" + codigoOra(e) + ")");
+            return ResultadoRegistro.naoRegistrado(data, TipoFalha.OUTRA,
+                    "catálogo: erro no banco (" + codigoOra(e) + ")");
         }
 
         RelatoExtraido extraido;
@@ -136,11 +148,11 @@ public class RegistroService {
             // A mensagem da ExtracaoException, por contrato, só tem status HTTP,
             // tipo de erro, nome e tipo de campo, nunca o relato. A resposta do
             // modelo (getRespostaBruta) fica de fora de propósito.
-            return ResultadoRegistro.naoRegistrado(data, "extração: " + e.getMessage());
+            return ResultadoRegistro.naoRegistrado(data, TipoFalha.OUTRA, "extração: " + e.getMessage());
         } catch (IOException e) {
             // Só a classe (HttpTimeoutException, ConnectException...): a mensagem
             // de uma IOException não tem formato garantido.
-            return ResultadoRegistro.naoRegistrado(data,
+            return ResultadoRegistro.naoRegistrado(data, TipoFalha.OUTRA,
                     "extração: falha de rede (" + e.getClass().getSimpleName() + ")");
         } catch (InterruptedException e) {
             // Interrupção = alguém pediu para a thread parar (ex.: desligar o bot).
@@ -159,7 +171,7 @@ public class RegistroService {
         if (problema != null) {
             // Tudo ou nada: uma série inválida derruba o relato inteiro. Gravar só
             // as válidas mostraria um treino incompleto como se fosse o certo.
-            return ResultadoRegistro.naoRegistrado(data, "validação: " + problema);
+            return ResultadoRegistro.naoRegistrado(data, TipoFalha.OUTRA, "validação: " + problema);
         }
 
         List<String> duvidas = new ArrayList<>();
@@ -178,18 +190,28 @@ public class RegistroService {
         // --- 3b. T2: sessão + séries + vínculo -------------------------------------
         try {
             gravarSessaoESeries(idUsuario, idMensagem, data, relato.observacaoDia(), series);
+        } catch (ObservacaoCheiaException e) {
+            // Antes do catch de SQLException (é uma subclasse dela). Ver a classe.
+            // O código (12899 ou 01489) fica no motivo: é por ele que se sabe, no
+            // log, qual dos dois limites estourou.
+            return ResultadoRegistro.naoRegistrado(data, TipoFalha.OBSERVACAO_CHEIA,
+                    "gravação: observação do dia acumulada não cabe mais (" + codigoOra(e) + ")");
         } catch (SQLException e) {
             // Só o código: a mensagem do Oracle pode citar o nome do esquema
             // (o usuário do banco) e valores.
-            return ResultadoRegistro.naoRegistrado(data, "gravação: erro no banco (" + codigoOra(e) + ")");
+            return ResultadoRegistro.naoRegistrado(data, TipoFalha.OUTRA,
+                    "gravação: erro no banco (" + codigoOra(e) + ")");
         } catch (IllegalStateException e) {
             // vincularSessao / acrescentarObservacao não acharam a linha do usuário.
             // A mensagem da exceção tem ids internos: fica de fora, texto fixo.
-            return ResultadoRegistro.naoRegistrado(data, "gravação: sessão ou mensagem não pertence ao usuário");
+            return ResultadoRegistro.naoRegistrado(data, TipoFalha.OUTRA,
+                    "gravação: sessão ou mensagem não pertence ao usuário");
         }
 
         // Sem séries e com observação também cai aqui: REGISTRADO com lista vazia.
-        return ResultadoRegistro.registrado(data, series, duvidas);
+        // observacaoAnotada: o relato já está normalizado, então observação em
+        // branco conta como "não houve".
+        return ResultadoRegistro.registrado(data, series, duvidas, relato.observacaoDia() != null);
     }
 
     // T1. Conexão própria, só para isto: comita e fecha antes da API.
@@ -238,7 +260,31 @@ public class RegistroService {
                 } else {
                     idSessao = existente.get();
                     if (observacao != null) {
-                        sessaoDAO.acrescentarObservacao(conn, idSessao, idUsuario, observacao);
+                        try {
+                            sessaoDAO.acrescentarObservacao(conn, idSessao, idUsuario, observacao);
+                        } catch (SQLException e) {
+                            // OBSERVACAO_CHEIA é marcada pela CHAMADA que falhou, não
+                            // só pelo código: ORA-12899 também sairia de uma coluna de
+                            // TR_SERIE, e aí "mande sem observação" seria a resposta
+                            // errada. Um ORA-01489 vindo de outro ponto também
+                            // continua OUTRA (não passa por este catch).
+                            //
+                            // Nesta chamada, 12899 e 01489 querem dizer a mesma coisa:
+                            // a observação do dia não cabe mais. Qual dos dois vem
+                            // depende dos BYTES. O Oracle primeiro calcula
+                            // OBSERVACAO || CHR(10) || ?, e uma concatenação de
+                            // VARCHAR2 não pode passar de 4000 bytes (01489). Só
+                            // depois compara o resultado com o limite da coluna,
+                            // 1000 caracteres (12899). Texto simples estoura os 1000
+                            // caracteres com uns 1000 bytes: dá 12899. Com acento e
+                            // emoji (2 a 4 bytes cada) os 4000 bytes estouram junto,
+                            // e a concatenação falha antes: dá 01489.
+                            if (e.getErrorCode() == ORA_VALOR_GRANDE_DEMAIS
+                                    || e.getErrorCode() == ORA_CONCATENACAO_LONGA_DEMAIS) {
+                                throw new ObservacaoCheiaException(e);
+                            }
+                            throw e;
+                        }
                     }
                 }
 
@@ -266,6 +312,18 @@ public class RegistroService {
                     desfazer(conn, original);
                 }
             }
+        }
+    }
+
+    // Marca, dentro da T2, que o ORA-12899 veio do acrescentarObservacao.
+    // Subclasse de SQLException de propósito: passa pelo mesmo catch da T2 (que
+    // guarda a original e faz o rollback) sem mudar nada nele, e o registrar a
+    // separa das outras SQLException só pelo tipo. Mantém o código e o SQLState
+    // do Oracle (codigoOra continua funcionando) e a original como causa. A
+    // mensagem é fixa: a do Oracle cita o esquema e os tamanhos.
+    private static final class ObservacaoCheiaException extends SQLException {
+        ObservacaoCheiaException(SQLException causa) {
+            super("Observação do dia acumulada passou do limite.", causa.getSQLState(), causa.getErrorCode(), causa);
         }
     }
 
