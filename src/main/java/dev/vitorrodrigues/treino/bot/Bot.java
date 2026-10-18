@@ -13,10 +13,11 @@ import dev.vitorrodrigues.treino.extrator.ExtratorCliente;
 import dev.vitorrodrigues.treino.factory.ConnectionFactory;
 import dev.vitorrodrigues.treino.modelo.Usuario;
 import dev.vitorrodrigues.treino.service.CadastroService;
+import dev.vitorrodrigues.treino.service.CorrecaoService;
 import dev.vitorrodrigues.treino.service.RegistroService;
 
 /**
- * O bot de verdade, rodando no notebook (fatia 6a; cadastro na 6b).
+ * O bot de verdade, rodando no notebook (fatia 6a; cadastro na 6b; /desfazer na 6c).
  *
  * Subida: confere tudo o que dá para conferir ANTES do loop e falha alto, com
  * mensagem clara, se algo faltar. Melhor não subir do que subir e descobrir o
@@ -119,6 +120,8 @@ public class Bot {
         // 6b: /start e /aprovar. Abre a própria conexão a cada operação, como o
         // RegistroService.
         CadastroService cadastro = new CadastroService();
+        // 6c: /desfazer. Também abre a própria conexão a cada operação.
+        CorrecaoService correcao = new CorrecaoService();
         ClienteTelegram telegram = new ClienteTelegramHttp(System.getenv("TELEGRAM_BOT_TOKEN"));
 
         // Busca do remetente: uma conexão por busca (sem pool, regra do projeto).
@@ -131,7 +134,7 @@ public class Bot {
 
         // idAdministrador: só ele usa /aprovar, e é para o chat dele que vai o aviso
         // de novo pedido de acesso.
-        return new LoopTelegram(telegram, registro, usuarios, cadastro, idAdministrador, Thread::sleep,
+        return new LoopTelegram(telegram, registro, usuarios, cadastro, correcao, idAdministrador, Thread::sleep,
                 Clock.system(SAO_PAULO), System.out::println);
     }
 

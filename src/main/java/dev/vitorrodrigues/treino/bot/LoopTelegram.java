@@ -21,9 +21,11 @@ import java.util.function.Consumer;
 import java.util.regex.Pattern;
 
 import dev.vitorrodrigues.treino.modelo.ResultadoAprovacao;
+import dev.vitorrodrigues.treino.modelo.ResultadoDesfazer;
 import dev.vitorrodrigues.treino.modelo.ResultadoRegistro;
 import dev.vitorrodrigues.treino.modelo.Usuario;
 import dev.vitorrodrigues.treino.service.Cadastrador;
+import dev.vitorrodrigues.treino.service.Corretor;
 import dev.vitorrodrigues.treino.service.Registrador;
 import tools.jackson.databind.JsonNode;
 
@@ -31,6 +33,8 @@ import tools.jackson.databind.JsonNode;
  * O loop do bot (fatia 6a): getUpdates -> filtros -> RegistroService -> resposta.
  * Fatia 6b: cadastro pelo bot (/start de quem não está cadastrado vira PENDENTE)
  * e /aprovar do administrador.
+ * Fatia 6c: /desfazer, que marca como desfeita a última mensagem registrada de
+ * quem manda (exclusão lógica: nada é apagado).
  *
  * REGRA CENTRAL DO OFFSET. O offset diz ao Telegram "até aqui já processei"; o
  * que fica antes dele o Telegram apaga. Então o offset só avança quando a
@@ -42,11 +46,12 @@ import tools.jackson.databind.JsonNode;
  * paralelo, a mesma data poderia ganhar duas sessões).
  *
  * Todas as dependências chegam por interface (ClienteTelegram, Registrador,
- * BuscaUsuario, Cadastrador, Espera), mais o relógio e a saída do log. Assim o
- * TelegramSpike exercita o loop inteiro sem celular, sem banco e sem rede.
+ * BuscaUsuario, Cadastrador, Corretor, Espera), mais o relógio e a saída do log.
+ * Assim o TelegramSpike exercita o loop inteiro sem celular, sem banco e sem rede.
  *
  * LOG: uma linha por update. Nunca vai para o log: texto da mensagem, nome
- * (first_name), from.id, ID_USUARIO, argumento do /aprovar, dúvidas, token. Só
+ * (first_name), from.id, ID_USUARIO, ID_MENSAGEM, argumento do /aprovar, dúvidas,
+ * resumo do /desfazer (nomes de exercício, texto relatado), token. Só
  * tipo, situação, motivo (que, por contrato, não tem texto do usuário), código
  * ORA, status HTTP e nome de classe. Nunca imprimir um Usuario: o toString() dele
  * tem nome e id.
@@ -108,9 +113,11 @@ public class LoopTelegram {
             Map.entry("contact", "contato"),
             Map.entry("poll", "enquete"));
 
-    // Comandos conhecidos (6b). Comparação exata, depois de tirar o "@nome_do_bot".
+    // Comandos conhecidos (6b; /desfazer na 6c). Comparação exata, depois de tirar
+    // o "@nome_do_bot".
     private static final String START = "/start";
     private static final String APROVAR = "/aprovar";
+    private static final String DESFAZER = "/desfazer";
 
     private static final String PENDENTE = "PENDENTE";
 
@@ -127,6 +134,7 @@ public class LoopTelegram {
     private final Registrador registrador;
     private final BuscaUsuario usuarios;
     private final Cadastrador cadastro;
+    private final Corretor corretor;
     // TELEGRAM_CHAT_ID_PERMITIDO: o from.id do administrador. É também o chat id
     // do aviso de novo pedido: na conversa privada, chat id = from.id.
     private final long idAdministrador;
@@ -147,11 +155,13 @@ public class LoopTelegram {
     private int tentativasNoBanco = 0;
 
     public LoopTelegram(ClienteTelegram telegram, Registrador registrador, BuscaUsuario usuarios,
-            Cadastrador cadastro, long idAdministrador, Espera espera, Clock relogio, Consumer<String> log) {
+            Cadastrador cadastro, Corretor corretor, long idAdministrador, Espera espera, Clock relogio,
+            Consumer<String> log) {
         this.telegram = Objects.requireNonNull(telegram, "telegram");
         this.registrador = Objects.requireNonNull(registrador, "registrador");
         this.usuarios = Objects.requireNonNull(usuarios, "usuarios");
         this.cadastro = Objects.requireNonNull(cadastro, "cadastro");
+        this.corretor = Objects.requireNonNull(corretor, "corretor");
         this.idAdministrador = idAdministrador;
         this.espera = Objects.requireNonNull(espera, "espera");
         this.relogio = Objects.requireNonNull(relogio, "relogio");
@@ -277,6 +287,13 @@ public class LoopTelegram {
         // Em que ponto uma SQLException aconteceu, para a linha de log
         // (tratarErroNoBanco). Começa na busca do remetente, o primeiro acesso ao banco.
         String etapa = "ao buscar o remetente";
+        // O que tratarErroNoBanco responde na recusa do banco e na desistência
+        // (teto de tentativas). Padrão: os textos da 6a, que falam em salvar a
+        // mensagem. O /desfazer troca os dois pelo dele (6c): para quem pediu para
+        // desfazer, "não consegui salvar essa mensagem" não diz o que aconteceu.
+        // Campo próprio, e não um if no texto da etapa: a etapa é só rótulo de log.
+        String avisoDeRecusa = Textos.NAO_CONSEGUI_SALVAR;
+        String avisoDeDesistencia = Textos.NAO_CONSEGUI_SALVAR_DEPOIS_DE_TENTAR;
         // Um update pode mandar até duas mensagens (resposta + aviso ao admin, ou
         // resposta + aviso ao aprovado): cada envio que falhou vira um item.
         final List<String> falhasNoEnvio = new ArrayList<>();
@@ -420,7 +437,7 @@ public class LoopTelegram {
         // 7. Comando nunca vai para o extrator: não é relato de treino, e
         //    gastaria crédito à toa.
         if (comando != null) {
-            tratarComando(comando, idTelegram, atendimento);
+            tratarComando(comando, idTelegram, usuario, mensagem, atendimento);
             return;
         }
 
@@ -440,9 +457,11 @@ public class LoopTelegram {
         }
     }
 
-    // Ponto único de roteamento dos comandos de quem está ATIVO (passo 7).
-    private void tratarComando(Comando comando, long idTelegram, Atendimento atendimento)
-            throws SQLException, InterruptedException {
+    // Ponto único de roteamento dos comandos de quem está ATIVO (passo 7). O
+    // PENDENTE nunca chega aqui (atenderPendente responde "aguardando aprovação" a
+    // qualquer comando, inclusive /desfazer), nem o BLOQUEADO ou o desconhecido.
+    private void tratarComando(Comando comando, long idTelegram, Usuario usuario, JsonNode mensagem,
+            Atendimento atendimento) throws SQLException, InterruptedException {
         if (START.equals(comando.nome())) {
             atendimento.resultado = "start: já cadastrado";
             responder(atendimento, Textos.JA_CADASTRADO);
@@ -459,6 +478,10 @@ public class LoopTelegram {
                 return;
             }
             aprovar(comando.argumento(), atendimento);
+            return;
+        }
+        if (DESFAZER.equals(comando.nome())) {
+            desfazer(usuario, mensagem, atendimento);
             return;
         }
         atendimento.resultado = "ignorado: comando não reconhecido";
@@ -565,14 +588,52 @@ public class LoopTelegram {
         }
     }
 
+    // --- 6c: /desfazer ------------------------------------------------------------------
+
+    // /desfazer de quem está ATIVO (regras 2 e 3 da 6c). O argumento é ignorado:
+    // "/desfazer 3" faz o mesmo que "/desfazer" (desfazer uma série isolada está
+    // fora da 6c).
+    // Sem confirmação ("tem certeza?"): exigiria guardar estado de conversa, e como
+    // nada é apagado, um /desfazer por engano custa só reenviar o relato.
+    private void desfazer(Usuario usuario, JsonNode mensagem, Atendimento atendimento)
+            throws SQLException, InterruptedException {
+        // Data de ENVIO do /desfazer (ver dataDeEnvio): é a referência da janela de
+        // 24 h e o valor gravado em DATA_HORA_DESFEITA. Com o bot parado, o comando
+        // chega atrasado; a janela conta de quando o usuário mandou.
+        LocalDateTime envio = dataDeEnvio(mensagem);
+        // message_id do /desfazer: identifica o COMANDO. Numa reentrega do
+        // Telegram ele vem igual, e é assim que o service sabe que já aplicou.
+        long idTelegramDoComando = inteiro(mensagem, "message_id");
+        atendimento.etapa = "ao desfazer";
+        atendimento.avisoDeRecusa = Textos.NAO_CONSEGUI_DESFAZER;
+        atendimento.avisoDeDesistencia = Textos.NAO_CONSEGUI_DESFAZER;
+        // O service comita ANTES de qualquer envio: o bot só diz "desfeito" sobre o
+        // que ficou gravado.
+        ResultadoDesfazer resultado = corretor.desfazerUltima(usuario.idUsuario(), idTelegramDoComando, envio);
+
+        // No log, só a situação (regra 5 da 6c): nunca o resumo (nomes de
+        // exercício, texto relatado), o ID_MENSAGEM nem o ID_USUARIO.
+        atendimento.resultado = switch (resultado.situacao()) {
+            case DESFEITO -> "desfazer: desfeito";
+            case NADA_PARA_DESFAZER -> "desfazer: nada para desfazer";
+            case JA_APLICADO -> "desfazer: já aplicado (reentrega)";
+        };
+        // null no JA_APLICADO: silêncio (ver Respostas).
+        String resposta = Respostas.para(resultado);
+        if (resposta != null) {
+            responder(atendimento, resposta);
+        }
+    }
+
     // --- Seção 2: SQLException antes de a mensagem estar salva ------------------------
 
     // Vale para a busca do remetente, a T1 do registrar (depois da T1, o service
-    // devolve NAO_REGISTRADO em vez de exceção) e, desde a 6b, o cadastro do
-    // /start e o /aprovar. Nos dois últimos, nada foi comitado (o service desfez):
-    // repetir o update é seguro.
+    // devolve NAO_REGISTRADO em vez de exceção), desde a 6b o cadastro do /start e o
+    // /aprovar e, desde a 6c, o /desfazer. Nos três últimos, nada foi comitado (o
+    // service desfez a transação): repetir o update é seguro.
     // A resposta de erro só sai se o bot já podia falar com o remetente (chatId):
-    // na busca, não; no cadastro, sim (caminho do /start); no /aprovar, é o admin.
+    // na busca, não; no cadastro, sim (caminho do /start); no /aprovar, é o admin;
+    // no /desfazer, é um ATIVO.
     private Duration tratarErroNoBanco(SQLException e, long updateId, Atendimento atendimento)
             throws InterruptedException {
         String onde = atendimento.etapa;
@@ -580,7 +641,7 @@ public class LoopTelegram {
 
         if (recusaDoBanco(e)) {
             atendimento.resultado = "recusa do banco " + onde + " (" + codigo + "); avançou";
-            responder(atendimento, Textos.NAO_CONSEGUI_SALVAR);
+            responder(atendimento, atendimento.avisoDeRecusa);
             return null;
         }
 
@@ -590,7 +651,7 @@ public class LoopTelegram {
             // congelaria a fila de TODOS os usuários atrás desta mensagem.
             atendimento.resultado = "erro no banco " + onde + " (" + codigo + "), tentativa " + tentativa
                     + " de " + MAX_TENTATIVAS_BANCO + "; desistiu e avançou";
-            responder(atendimento, Textos.NAO_CONSEGUI_SALVAR_DEPOIS_DE_TENTAR);
+            responder(atendimento, atendimento.avisoDeDesistencia);
             return null;
         }
 

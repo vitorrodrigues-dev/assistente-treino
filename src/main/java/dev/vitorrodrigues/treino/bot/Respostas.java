@@ -3,15 +3,21 @@ package dev.vitorrodrigues.treino.bot;
 import java.math.BigDecimal;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 
 import dev.vitorrodrigues.treino.extrator.SerieExtraida;
+import dev.vitorrodrigues.treino.modelo.ResultadoDesfazer;
 import dev.vitorrodrigues.treino.modelo.ResultadoRegistro;
 import dev.vitorrodrigues.treino.modelo.ResultadoRegistro.SerieGravada;
+import dev.vitorrodrigues.treino.modelo.SerieResumida;
 
 /**
  * ResultadoRegistro -> texto da resposta no chat (seções 4 e 5 da fatia 6a).
+ * Fatia 6c: ResultadoDesfazer -> resposta do /desfazer.
  *
  * A confirmação é montada SÓ com os campos estruturados (números, booleanos, nome
  * do catálogo), nunca com o texto que o usuário mandou. Exceções: o
@@ -55,7 +61,8 @@ final class Respostas {
     }
 
     // Blocos separados por uma linha em branco:
-    // data / séries / "anotei a observação" / dúvidas. Bloco vazio não aparece.
+    // data / séries / "anotei a observação" / dúvidas / como corrigir (6c).
+    // Bloco vazio não aparece.
     private static String confirmacao(ResultadoRegistro resultado) {
         List<String> blocos = new ArrayList<>();
         // Data sempre explícita: "ontem" ainda grava com a data de envio (o prompt
@@ -72,6 +79,9 @@ final class Respostas {
         if (!resultado.duvidas().isEmpty()) {
             blocos.add(duvidas(resultado.duvidas()));
         }
+        // Sempre por último, e só aqui (REGISTRADO): é a única situação em que há
+        // registro para desfazer. Bloco próprio, para não parecer mais uma dúvida.
+        blocos.add(Textos.DICA_DESFAZER);
         return String.join("\n\n", blocos);
     }
 
@@ -170,5 +180,92 @@ final class Respostas {
             texto.append('\n').append(MARCADOR_DUVIDA).append(duvida);
         }
         return texto.toString();
+    }
+
+    // --- /desfazer (fatia 6c) ------------------------------------------------------------
+
+    /**
+     * Resposta do /desfazer.
+     *
+     * @return o texto, ou null (silêncio) só no JA_APLICADO
+     */
+    static String para(ResultadoDesfazer resultado) {
+        return switch (resultado.situacao()) {
+            case DESFEITO -> desfeito(resultado);
+            case NADA_PARA_DESFAZER -> Textos.NADA_PARA_DESFAZER;
+            // Silêncio, como no JA_GRAVADA: é a reentrega de um comando já
+            // aplicado. A resposta original já foi enviada, ou se perdeu na queda;
+            // responder de novo (com o resumo de quê?) só confundiria.
+            case JA_APLICADO -> null;
+        };
+    }
+
+    // Uma linha embaixo da outra, sem linha em branco (o exemplo da 6c): cabeçalho
+    // com a data / um resumo por exercício, ou "sem séries" / aviso da observação.
+    // Só exercício e contagem, sem carga nem repetições: basta para o usuário
+    // reconhecer QUAL registro saiu.
+    private static String desfeito(ResultadoDesfazer resultado) {
+        List<String> linhas = new ArrayList<>();
+        // A data da SESSÃO da mensagem desfeita, não a de hoje: com dois treinos nas
+        // 24 h (ontem à noite e hoje cedo), é ela que diz qual dos dois saiu.
+        linhas.add(Textos.DESFEITO_REGISTRO_DE.formatted(resultado.dataSessao().format(FORMATO_DATA)));
+        if (resultado.series().isEmpty()) {
+            linhas.add(Textos.DESFEITO_SEM_SERIES);
+        } else {
+            linhas.addAll(resumoPorExercicio(resultado.series()));
+        }
+        // A observação é concatenada na sessão, então não dá para saber se o texto
+        // veio desta mensagem: o aviso sai sempre que a sessão tiver observação.
+        if (resultado.sessaoComObservacao()) {
+            linhas.add(Textos.OBSERVACAO_NAO_DESFEITA);
+        }
+        return String.join("\n", linhas);
+    }
+
+    // "Um resumo por exercício, na ordem das séries" (regra 3 da 6c): UMA linha por
+    // exercício, na ordem em que ele aparece pela primeira vez; a contagem soma
+    // todas as séries dele, mesmo que o usuário tenha voltado ao exercício depois
+    // de outro. (A confirmação do registro, acima, mostra grupos consecutivos: lá
+    // se confere série a série; aqui só se reconhece o registro.)
+    private static List<String> resumoPorExercicio(List<SerieResumida> series) {
+        // LinkedHashMap: guarda a ordem da primeira aparição.
+        Map<ChaveExercicio, String> nomes = new LinkedHashMap<>();
+        Map<ChaveExercicio, Integer> quantidades = new HashMap<>();
+        for (SerieResumida serie : series) {
+            ChaveExercicio chave = ChaveExercicio.de(serie);
+            nomes.putIfAbsent(chave, nomeNoResumo(serie));
+            quantidades.merge(chave, 1, Integer::sum);
+        }
+        List<String> linhas = new ArrayList<>();
+        for (Map.Entry<ChaveExercicio, String> exercicio : nomes.entrySet()) {
+            linhas.add(exercicio.getValue() + " " + quantidade(quantidades.get(exercicio.getKey())));
+        }
+        return linhas;
+    }
+
+    // O que é "o mesmo exercício": o mesmo critério do mesmoExercicio da
+    // confirmação. Com id, o id do catálogo (dois relatos diferentes, "cavalinho"
+    // e "remada cavalinho", são o mesmo exercício); sem id, o exercicio_relatado.
+    // Um com id e outro sem são exercícios diferentes: o record compara os dois
+    // campos, e o relatado só é preenchido quando não há id.
+    private record ChaveExercicio(Long idExercicio, String relatado) {
+
+        static ChaveExercicio de(SerieResumida serie) {
+            return serie.idExercicio() != null
+                    ? new ChaveExercicio(serie.idExercicio(), null)
+                    : new ChaveExercicio(null, serie.exercicioRelatado());
+        }
+    }
+
+    // Com id, o nome do CATÁLOGO (lido de TR_EXERCICIO), nunca o que o modelo
+    // devolveu. Sem id, o que o usuário escreveu: é o que ele reconhece.
+    private static String nomeNoResumo(SerieResumida serie) {
+        return serie.idExercicio() != null
+                ? serie.nomeOficial()
+                : Textos.DESFEITO_NAO_RECONHECIDO.formatted(serie.exercicioRelatado());
+    }
+
+    private static String quantidade(int series) {
+        return series == 1 ? Textos.UMA_SERIE : Textos.VARIAS_SERIES.formatted(series);
     }
 }

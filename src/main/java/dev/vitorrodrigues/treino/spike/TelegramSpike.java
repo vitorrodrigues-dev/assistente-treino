@@ -17,9 +17,11 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Deque;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 import dev.vitorrodrigues.treino.bot.ClienteTelegram;
 import dev.vitorrodrigues.treino.bot.ErroTelegram;
@@ -29,25 +31,28 @@ import dev.vitorrodrigues.treino.bot.LoopTelegram.Encerramento;
 import dev.vitorrodrigues.treino.bot.Textos;
 import dev.vitorrodrigues.treino.extrator.SerieExtraida;
 import dev.vitorrodrigues.treino.modelo.ResultadoAprovacao;
+import dev.vitorrodrigues.treino.modelo.ResultadoDesfazer;
 import dev.vitorrodrigues.treino.modelo.ResultadoRegistro;
 import dev.vitorrodrigues.treino.modelo.ResultadoRegistro.SerieGravada;
 import dev.vitorrodrigues.treino.modelo.ResultadoRegistro.TipoFalha;
+import dev.vitorrodrigues.treino.modelo.SerieResumida;
 import dev.vitorrodrigues.treino.modelo.Usuario;
 import dev.vitorrodrigues.treino.service.Cadastrador;
+import dev.vitorrodrigues.treino.service.Corretor;
 import dev.vitorrodrigues.treino.service.Registrador;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 
 /**
- * Aceite das fatias 6a e 6b sem celular: o LoopTelegram inteiro, com falsos no
+ * Aceite das fatias 6a, 6b e 6c sem celular: o LoopTelegram inteiro, com falsos no
  * lugar do Telegram, do banco, da espera e do relógio. Sem banco, sem API, sem
  * rede: não custa nada rodar.
  *
  * Cada cenário entrega updates em JSON (no formato da Bot API) a um Telegram
  * falso e confere a resposta enviada (e para qual chat), o avanço do offset, as
  * esperas pedidas e a linha de log. No fim, confere que NENHUMA linha de log de
- * nenhum cenário contém texto, nome, from.id, ID_USUARIO ou argumento do
- * /aprovar dos updates de teste.
+ * nenhum cenário contém texto, nome, from.id, ID_USUARIO, argumento do /aprovar
+ * ou nome de exercício do resumo do /desfazer dos updates de teste.
  *
  * "Fulano", "Beltrano", "Sicrana" e "Deltrano" fazem o papel de outras pessoas;
  * "Ciclano" é o administrador.
@@ -125,6 +130,7 @@ public class TelegramSpike {
         cadastroPeloStart();
         aprovar();
         fluxoCompleto();
+        desfazer();
         higieneDoLog();
 
         System.out.println();
@@ -173,6 +179,9 @@ public class TelegramSpike {
         conferir("respostas, na ordem: PENDENTE (6b), figurinha, branco, edição, comando",
                 c.telegram.enviadas.equals(List.of(Textos.AGUARDANDO_APROVACAO, Textos.SO_ENTENDO_TEXTO,
                         Textos.SO_ENTENDO_TEXTO, Textos.EDICAO_IGNORADA, Textos.COMANDO_NAO_RECONHECIDO)));
+        // 6c: a edição deixou de mandar "mensagem nova com a correção" (que
+        // acrescentaria séries) e passou a orientar para o /desfazer.
+        conferir("edição: o aviso orienta a mandar /desfazer", Textos.EDICAO_IGNORADA.contains("/desfazer"));
         conferir("a do PENDENTE foi para o chat dele; as outras, para o de quem está ATIVO",
                 c.telegram.destinos.equals(List.of(ID_TELEGRAM_PENDENTE, ID_TELEGRAM_ATIVO, ID_TELEGRAM_ATIVO,
                         ID_TELEGRAM_ATIVO, ID_TELEGRAM_ATIVO)));
@@ -244,11 +253,17 @@ public class TelegramSpike {
                 Textos.OBSERVACAO_ANOTADA,
                 "",
                 Textos.PONTOS_NAO_CLAROS,
-                "- " + duvida);
+                "- " + duvida,
+                "",
+                Textos.DICA_DESFAZER);
         String enviada = responder(300, exemplo);
         System.out.println("        confirmação montada (exemplo da seção 4):");
         System.out.println(recuar(enviada));
         conferir("exemplo da seção 4, caractere por caractere", esperado.equals(enviada));
+        // 6c: a linha do /desfazer é o último bloco, depois das dúvidas.
+        conferir("6c: a confirmação termina com a linha do /desfazer, em bloco próprio",
+                enviada != null && enviada.endsWith("\n\n" + Textos.DICA_DESFAZER)
+                        && Textos.DICA_DESFAZER.contains("/desfazer"));
 
         // O resto da seção 4: "—" (carga e repetições), "~" na carga, 22,5,
         // "(sem falha)", 0 kg, 100 sem "1E+2", grupo que volta depois de outro,
@@ -276,7 +291,9 @@ public class TelegramSpike {
                 "  1ª: 30 kg × 12",
                 "  2ª: 30 kg × 12",
                 Textos.NAO_RECONHECI.formatted("pulldown"),
-                "  1ª: 25 kg × 12");
+                "  1ª: 25 kg × 12",
+                "",
+                Textos.DICA_DESFAZER);
         String enviadaDetalhes = responder(301, detalhes);
         System.out.println("        confirmação montada (—, ~, 22,5, sem falha, grupos):");
         System.out.println(recuar(enviadaDetalhes));
@@ -290,8 +307,9 @@ public class TelegramSpike {
         // Mensagem só com observação: REGISTRADO com lista vazia.
         String soObservacao = responder(302, ResultadoRegistro.registrado(LocalDate.of(2026, 10, 9),
                 List.of(), List.of(), true));
-        conferir("só observação: data + 'anotei a observação'", (Textos.REGISTRADO_EM.formatted("09/10/2026")
-                + "\n\n" + Textos.OBSERVACAO_ANOTADA).equals(soObservacao));
+        conferir("só observação: data + 'anotei a observação' + linha do /desfazer",
+                (Textos.REGISTRADO_EM.formatted("09/10/2026") + "\n\n" + Textos.OBSERVACAO_ANOTADA
+                        + "\n\n" + Textos.DICA_DESFAZER).equals(soObservacao));
     }
 
     // --- Seção 5: demais situações -------------------------------------------------------
@@ -306,11 +324,11 @@ public class TelegramSpike {
         conferirLinha(jaGravada, 400, "| texto | JA_GRAVADA |");
 
         String duvida = segredo("você perguntou da remada do Fulano?");
+        String semSeriesComDuvidas = responder(401, ResultadoRegistro.semSeries(dia, List.of(duvida)));
         conferir("SEM_SERIES com dúvidas: frase + bloco de dúvidas",
-                (Textos.SEM_SERIES + "\n\n" + Textos.PONTOS_NAO_CLAROS + "\n- " + duvida)
-                        .equals(responder(401, ResultadoRegistro.semSeries(dia, List.of(duvida)))));
-        conferir("SEM_SERIES sem dúvidas: só a frase",
-                Textos.SEM_SERIES.equals(responder(402, ResultadoRegistro.semSeries(dia, List.of()))));
+                (Textos.SEM_SERIES + "\n\n" + Textos.PONTOS_NAO_CLAROS + "\n- " + duvida).equals(semSeriesComDuvidas));
+        String semSeries = responder(402, ResultadoRegistro.semSeries(dia, List.of()));
+        conferir("SEM_SERIES sem dúvidas: só a frase", Textos.SEM_SERIES.equals(semSeries));
 
         Cenario outra = cenarioComResposta(403, ResultadoRegistro.naoRegistrado(dia, TipoFalha.OUTRA,
                 "extração: A API da Anthropic respondeu HTTP 401 (authentication_error)."));
@@ -318,9 +336,17 @@ public class TelegramSpike {
                 List.of(Textos.NAO_REGISTRADO).equals(outra.telegram.enviadas));
         conferirLinha(outra, 403, "| NAO_REGISTRADO: extração: A API da Anthropic respondeu HTTP 401");
 
-        conferir("NAO_REGISTRADO OBSERVACAO_CHEIA: mensagem própria",
-                Textos.OBSERVACAO_CHEIA.equals(responder(404, ResultadoRegistro.naoRegistrado(dia,
-                        TipoFalha.OBSERVACAO_CHEIA, "gravação: observação do dia acumulada (ORA-12899)"))));
+        String cheia = responder(404, ResultadoRegistro.naoRegistrado(dia,
+                TipoFalha.OBSERVACAO_CHEIA, "gravação: observação do dia acumulada (ORA-12899)"));
+        conferir("NAO_REGISTRADO OBSERVACAO_CHEIA: mensagem própria", Textos.OBSERVACAO_CHEIA.equals(cheia));
+
+        // 6c: a linha do /desfazer só existe no REGISTRADO (não há registro a
+        // desfazer nas outras situações; o JA_GRAVADA é silêncio).
+        List<String> semRegistro = new ArrayList<>(List.of(semSeriesComDuvidas, semSeries, cheia));
+        semRegistro.addAll(outra.telegram.enviadas);
+        conferir("6c: SEM_SERIES, NAO_REGISTRADO e OBSERVACAO_CHEIA sem a linha do /desfazer",
+                semRegistro.size() == 4 && semRegistro.stream()
+                        .noneMatch(t -> t == null || t.contains(Textos.DICA_DESFAZER)));
     }
 
     // --- Seção 2: SQLException antes de a mensagem estar salva ----------------------------
@@ -927,6 +953,241 @@ public class TelegramSpike {
                         && c.cadastro.cadastros == 1 && c.loop.offset() == 1412);
     }
 
+    // --- 6c: /desfazer ---------------------------------------------------------------------
+
+    private static void desfazer() throws InterruptedException {
+        titulo("6c: /desfazer (regras 2, 3 e 5)");
+        // Nomes do catálogo e textos relatados entram como segredo: nenhum pode ir
+        // para o log (regra 5).
+        String remada = segredo("Remada cavalinho");
+        String supino = segredo("Supino reto barra");
+        String barra = segredo("Barra fixa");
+        String puxada = segredo("puxada alta");
+        String pullDown = segredo("pull down");
+        String pulldown = segredo("pulldown");
+        String cavalinho = segredo("cavalinho do Fulano");
+
+        // O exemplo da especificação: nome do catálogo, não reconhecido, contagem e
+        // o aviso de que a observação do dia fica.
+        Cenario exemplo = new Cenario();
+        exemplo.corretor.respostas.add(() -> ResultadoDesfazer.desfeito(LocalDate.of(2026, 10, 12), List.of(
+                resumida(15L, remada, cavalinho),
+                resumida(15L, remada, cavalinho),
+                resumida(null, null, puxada),
+                resumida(null, null, puxada),
+                resumida(null, null, puxada)), true));
+        exemplo.telegram.updates.add(texto(1500, ID_TELEGRAM_ATIVO, NOME_ATIVO, "/desfazer"));
+        exemplo.rodarAteEsvaziar();
+        String esperado = String.join("\n",
+                Textos.DESFEITO_REGISTRO_DE.formatted("12/10/2026"),
+                remada + " " + Textos.VARIAS_SERIES.formatted(2),
+                Textos.DESFEITO_NAO_RECONHECIDO.formatted(puxada) + " " + Textos.VARIAS_SERIES.formatted(3),
+                Textos.OBSERVACAO_NAO_DESFEITA);
+        String enviada = exemplo.telegram.enviadas.isEmpty() ? null : exemplo.telegram.enviadas.get(0);
+        System.out.println("        resposta montada (exemplo da 6c):");
+        System.out.println(recuar(enviada));
+        conferir("desfeito: exemplo da especificação, caractere por caractere", esperado.equals(enviada));
+        conferir("desfeito: uma resposta só, no chat de quem mandou",
+                exemplo.telegram.destinos.equals(List.of(ID_TELEGRAM_ATIVO)));
+        conferir("desfeito: corretor chamado 1 vez, com o ID_USUARIO interno (não o from.id)",
+                exemplo.corretor.chamadas == 1 && exemplo.corretor.idUsuario == ID_USUARIO_ATIVO);
+        conferir("desfeito: com o message_id do /desfazer (6500), que identifica o comando",
+                exemplo.corretor.idTelegramDoComando == 6500);
+        conferir("desfeito: envio do /desfazer = date em São Paulo (09/10 10:02:15)",
+                LocalDateTime.of(2026, 10, 9, 10, 2, 15).equals(exemplo.corretor.envio));
+        conferir("desfeito: /desfazer não vai para o registrar (nem para o extrator)",
+                exemplo.registrador.chamadas == 0);
+        conferir("desfeito: avançou (1501)", exemplo.loop.offset() == 1501);
+        conferirLinha(exemplo, 1500, "| comando | desfazer: desfeito |");
+
+        // Um resumo por exercício, na ordem da primeira aparição: o supino que volta
+        // depois da remada soma no mesmo; dois relatos diferentes do mesmo id são um
+        // exercício só; sem id, o relatado decide; um com id e outro sem, mesmo
+        // relatado, são diferentes; 1 série no singular; sem observação, sem aviso.
+        Cenario grupos = new Cenario();
+        grupos.corretor.respostas.add(() -> ResultadoDesfazer.desfeito(LocalDate.of(2026, 10, 11), List.of(
+                resumida(7L, supino, "supino"),
+                resumida(15L, remada, cavalinho),
+                resumida(7L, supino, "supino reto"),
+                resumida(null, null, pullDown),
+                resumida(null, null, pulldown),
+                resumida(null, null, pullDown),
+                resumida(3L, barra, pullDown)), false));
+        grupos.telegram.updates.add(texto(1510, ID_TELEGRAM_ATIVO, NOME_ATIVO, "/desfazer"));
+        grupos.rodarAteEsvaziar();
+        String esperadoGrupos = String.join("\n",
+                Textos.DESFEITO_REGISTRO_DE.formatted("11/10/2026"),
+                supino + " " + Textos.VARIAS_SERIES.formatted(2),
+                remada + " " + Textos.UMA_SERIE,
+                Textos.DESFEITO_NAO_RECONHECIDO.formatted(pullDown) + " " + Textos.VARIAS_SERIES.formatted(2),
+                Textos.DESFEITO_NAO_RECONHECIDO.formatted(pulldown) + " " + Textos.UMA_SERIE,
+                barra + " " + Textos.UMA_SERIE);
+        String enviadaGrupos = grupos.telegram.enviadas.isEmpty() ? null : grupos.telegram.enviadas.get(0);
+        System.out.println("        resposta montada (agrupamento por exercício):");
+        System.out.println(recuar(enviadaGrupos));
+        conferir("resumo: uma linha por exercício, ordem da 1ª aparição, contagem total, singular",
+                esperadoGrupos.equals(enviadaGrupos));
+        conferir("resumo: sem observação na sessão, sem o aviso",
+                enviadaGrupos != null && !enviadaGrupos.contains(Textos.OBSERVACAO_NAO_DESFEITA));
+
+        // Mensagem desfeita que só tinha observação: cabeçalho + "(sem séries)".
+        Cenario soObservacao = new Cenario();
+        soObservacao.corretor.respostas.add(() -> ResultadoDesfazer.desfeito(LocalDate.of(2026, 10, 9),
+                List.of(), true));
+        soObservacao.corretor.respostas.add(() -> ResultadoDesfazer.desfeito(LocalDate.of(2026, 10, 9),
+                List.of(), false));
+        soObservacao.telegram.updates.add(texto(1520, ID_TELEGRAM_ATIVO, NOME_ATIVO, "/desfazer"));
+        soObservacao.telegram.updates.add(texto(1521, ID_TELEGRAM_ATIVO, NOME_ATIVO, "/desfazer"));
+        soObservacao.rodarAteEsvaziar();
+        conferir("sem séries, sessão com observação: cabeçalho, '(sem séries)' e o aviso",
+                soObservacao.telegram.enviadas.size() == 2 && String.join("\n",
+                        Textos.DESFEITO_REGISTRO_DE.formatted("09/10/2026"), Textos.DESFEITO_SEM_SERIES,
+                        Textos.OBSERVACAO_NAO_DESFEITA).equals(soObservacao.telegram.enviadas.get(0)));
+        conferir("sem séries, sessão sem observação: cabeçalho e '(sem séries)'",
+                soObservacao.telegram.enviadas.size() == 2 && String.join("\n",
+                        Textos.DESFEITO_REGISTRO_DE.formatted("09/10/2026"), Textos.DESFEITO_SEM_SERIES)
+                        .equals(soObservacao.telegram.enviadas.get(1)));
+
+        // Nada para desfazer.
+        Cenario nada = new Cenario();
+        nada.corretor.respostas.add(ResultadoDesfazer::nadaParaDesfazer);
+        nada.telegram.updates.add(texto(1530, ID_TELEGRAM_ATIVO, NOME_ATIVO, "/desfazer"));
+        nada.rodarAteEsvaziar();
+        conferir("nada para desfazer: a frase, no chat de quem mandou",
+                nada.telegram.enviadas.equals(List.of(Textos.NADA_PARA_DESFAZER))
+                        && nada.telegram.destinos.equals(List.of(ID_TELEGRAM_ATIVO)));
+        conferir("nada para desfazer: avançou (1531)", nada.loop.offset() == 1531);
+        conferirLinha(nada, 1530, "| comando | desfazer: nada para desfazer |");
+
+        // Reconhecimento da 6b: primeiro token, sem o "@bot"; argumento ignorado.
+        // O admin também é ATIVO: o /desfazer dele age sobre as mensagens DELE.
+        Cenario variantes = new Cenario();
+        variantes.corretor.respostas.add(ResultadoDesfazer::nadaParaDesfazer);
+        variantes.corretor.respostas.add(ResultadoDesfazer::nadaParaDesfazer);
+        variantes.corretor.respostas.add(ResultadoDesfazer::nadaParaDesfazer);
+        variantes.telegram.updates.addAll(List.of(
+                texto(1540, ID_TELEGRAM_ATIVO, NOME_ATIVO, "/desfazer@TreinoBot"),
+                texto(1541, ID_TELEGRAM_ATIVO, NOME_ATIVO, "/desfazer 3 séries do supino do Fulano"),
+                texto(1542, ID_TELEGRAM_ADMIN, NOME_ADMIN, "/desfazer")));
+        variantes.rodarAteEsvaziar();
+        conferir("/desfazer@TreinoBot, /desfazer <argumento> e o admin: o corretor foi chamado nos três",
+                variantes.corretor.chamadas == 3
+                        && variantes.corretor.idsUsuario.equals(List.of(ID_USUARIO_ATIVO, ID_USUARIO_ATIVO,
+                                ID_USUARIO_ADMIN)));
+        conferir("variantes: 'nada para desfazer' três vezes, cada uma no chat de quem mandou",
+                variantes.telegram.enviadas.equals(Collections.nCopies(3, Textos.NADA_PARA_DESFAZER))
+                        && variantes.telegram.destinos.equals(List.of(ID_TELEGRAM_ATIVO, ID_TELEGRAM_ATIVO,
+                                ID_TELEGRAM_ADMIN)));
+        conferirLinha(variantes, 1540, "| comando | desfazer: nada para desfazer |");
+        conferirLinha(variantes, 1541, "| comando | desfazer: nada para desfazer |");
+
+        // Quem não está ATIVO: PENDENTE recebe "aguardando" (regra da 6b, sem
+        // mudança); BLOQUEADO e desconhecido, silêncio. Ninguém chega ao corretor.
+        Cenario naoAtivos = new Cenario();
+        naoAtivos.telegram.updates.addAll(List.of(
+                texto(1550, ID_TELEGRAM_PENDENTE, NOME_PENDENTE, "/desfazer"),
+                texto(1551, ID_TELEGRAM_BLOQUEADO, NOME_BLOQUEADO, "/desfazer"),
+                texto(1552, ID_TELEGRAM_DESCONHECIDO, NOME_NOVO, "/desfazer")));
+        naoAtivos.rodarAteEsvaziar();
+        conferir("PENDENTE /desfazer: 'aguardando aprovação', no chat dele; BLOQUEADO e desconhecido: silêncio",
+                naoAtivos.telegram.enviadas.equals(List.of(Textos.AGUARDANDO_APROVACAO))
+                        && naoAtivos.telegram.destinos.equals(List.of(ID_TELEGRAM_PENDENTE)));
+        conferir("não ATIVOS: nada desfeito, registrado nem cadastrado; avançou (1553)",
+                naoAtivos.nadaGravado() && naoAtivos.loop.offset() == 1553);
+        conferirLinha(naoAtivos, 1550, "| comando | ignorado: remetente PENDENTE |");
+        conferirLinha(naoAtivos, 1551, "| comando | ignorado: remetente BLOQUEADO |");
+        conferirLinha(naoAtivos, 1552, "| comando | ignorado: remetente não cadastrado |");
+
+        // Conexão caída: decisão de offset da 6a. Não avança, espera, não responde;
+        // na volta do banco, desfaz e responde uma vez só.
+        Cenario conexao = new Cenario();
+        conexao.corretor.respostas.add(() -> {
+            throw new SQLRecoverableException("IO Error", "08006", 17002);
+        });
+        conexao.corretor.respostas.add(() -> ResultadoDesfazer.desfeito(LocalDate.of(2026, 10, 9),
+                List.of(resumida(15L, remada, cavalinho)), false));
+        conexao.telegram.updates.add(texto(1560, ID_TELEGRAM_ATIVO, NOME_ATIVO, "/desfazer"));
+        conexao.loop.umaVolta();
+        conferir("conexão no /desfazer: não avançou, espera 5 s, sem resposta", conexao.loop.offset() == 0
+                && segundos(conexao.esperas).equals(List.of(5L)) && conexao.telegram.tentativasDeEnvio == 0);
+        conferirLinha(conexao, 1560, "erro no banco ao desfazer (ORA-17002), tentativa 1 de 10; repete em 5 s");
+        conexao.rodarAteEsvaziar();
+        conferir("conexão no /desfazer: na 2ª tentativa desfez, respondeu uma vez e avançou",
+                conexao.corretor.chamadas == 2 && conexao.loop.offset() == 1561
+                        && conexao.telegram.enviadas.equals(List.of(String.join("\n",
+                                Textos.DESFEITO_REGISTRO_DE.formatted("09/10/2026"),
+                                remada + " " + Textos.UMA_SERIE))));
+        conferirLinha(conexao, 1560, "| comando | desfazer: desfeito |");
+
+        // Recusa do banco (ex.: CK_TR_MENSAGEM_DESFEITA): avança sem esperar e avisa.
+        Cenario recusa = new Cenario();
+        recusa.corretor.respostas.add(() -> {
+            throw new SQLIntegrityConstraintViolationException("ORA-02290: check constraint violated",
+                    "23000", 2290);
+        });
+        recusa.telegram.updates.add(texto(1570, ID_TELEGRAM_ATIVO, NOME_ATIVO, "/desfazer"));
+        recusa.rodarAteEsvaziar();
+        conferir("recusa no /desfazer: tentou 1 vez, avançou sem esperar",
+                recusa.corretor.chamadas == 1 && recusa.loop.offset() == 1571 && recusa.esperas.isEmpty());
+        // Texto próprio do /desfazer (ajuste da 6c), não o "não consegui salvar".
+        conferir("recusa no /desfazer: 'não consegui desfazer', no chat de quem mandou",
+                recusa.telegram.enviadas.equals(List.of(Textos.NAO_CONSEGUI_DESFAZER))
+                        && recusa.telegram.destinos.equals(List.of(ID_TELEGRAM_ATIVO))
+                        && !Textos.NAO_CONSEGUI_DESFAZER.equals(Textos.NAO_CONSEGUI_SALVAR));
+        conferirLinha(recusa, 1570, "recusa do banco ao desfazer (ORA-02290); avançou");
+
+        // Desistência (teto de 10 tentativas com o banco fora): o mesmo texto próprio.
+        Cenario teto = new Cenario();
+        for (int i = 0; i < 10; i++) {
+            teto.corretor.respostas.add(() -> {
+                throw new SQLRecoverableException("IO Error", "08006", 17002);
+            });
+        }
+        teto.telegram.updates.add(texto(1575, ID_TELEGRAM_ATIVO, NOME_ATIVO, "/desfazer"));
+        teto.rodarAteEsvaziar();
+        conferir("teto no /desfazer: 10 tentativas, avançou, 'não consegui desfazer' uma vez",
+                teto.corretor.chamadas == 10 && teto.loop.offset() == 1576
+                        && teto.telegram.enviadas.equals(List.of(Textos.NAO_CONSEGUI_DESFAZER)));
+        conferirLinha(teto, 1575, "erro no banco ao desfazer (ORA-17002), tentativa 10 de 10; desistiu e avançou");
+
+        // Reentrega (ajuste da 6c): o bot comitou o /desfazer e caiu antes de
+        // confirmar o offset. Na nova subida (loop novo, offset 0, mesmo "banco"),
+        // o Telegram entrega o MESMO update, com o mesmo message_id: silêncio e
+        // nenhum UPDATE novo.
+        Cenario reentrega = new Cenario();
+        reentrega.corretor.respostas.add(() -> ResultadoDesfazer.desfeito(LocalDate.of(2026, 10, 9),
+                List.of(resumida(15L, remada, cavalinho)), false));
+        reentrega.telegram.updates.add(texto(1580, ID_TELEGRAM_ATIVO, NOME_ATIVO, "/desfazer"));
+        reentrega.rodarAteEsvaziar();
+        conferir("reentrega, 1ª entrega: desfez (1 marcação) e respondeu",
+                reentrega.corretor.marcacoes == 1 && reentrega.telegram.enviadas.size() == 1);
+        conferirLinha(reentrega, 1580, "| comando | desfazer: desfeito |");
+        reentrega.reiniciar();
+        conferir("reentrega: o loop novo começa do offset 0", reentrega.loop.offset() == 0);
+        reentrega.rodarAteEsvaziar();
+        conferir("reentrega: o corretor recebeu o MESMO message_id (6580) de novo",
+                reentrega.corretor.chamadas == 2 && reentrega.corretor.idTelegramDoComando == 6580);
+        conferir("reentrega: nenhum UPDATE novo (continua 1 marcação)", reentrega.corretor.marcacoes == 1);
+        conferir("reentrega: silêncio (só a resposta da 1ª entrega)", reentrega.telegram.enviadas.size() == 1
+                && reentrega.telegram.tentativasDeEnvio == 1);
+        conferir("reentrega: avançou (1581)", reentrega.loop.offset() == 1581);
+        conferirLinha(reentrega, 1580, "| comando | desfazer: já aplicado (reentrega) |");
+
+        // Regra 5, conferida aqui também (a conferência geral, no fim, cobre os
+        // segredos acima em todas as linhas): as linhas do /desfazer não têm nome de
+        // exercício, texto relatado, ID_USUARIO nem from.id.
+        List<String> linhasDesfazer = new ArrayList<>();
+        for (Cenario c : List.of(exemplo, grupos, nada, variantes, conexao, recusa, teto, reentrega)) {
+            linhasDesfazer.addAll(c.log);
+        }
+        List<String> proibidos = List.of(remada, supino, barra, puxada, pullDown, pulldown, cavalinho,
+                String.valueOf(ID_USUARIO_ATIVO), String.valueOf(ID_USUARIO_ADMIN),
+                String.valueOf(ID_TELEGRAM_ATIVO), String.valueOf(ID_TELEGRAM_ADMIN));
+        conferir("log do /desfazer sem nome de exercício, relatado, ID_USUARIO nem from.id ("
+                + linhasDesfazer.size() + " linhas)", !linhasDesfazer.isEmpty() && linhasDesfazer.stream()
+                        .noneMatch(l -> proibidos.stream().anyMatch(l::contains)));
+    }
+
     // --- Seção 8: nada sensível no log ----------------------------------------------------
 
     private static void higieneDoLog() {
@@ -989,6 +1250,11 @@ public class TelegramSpike {
             Boolean falha, String percepcao) {
         return new SerieGravada(new SerieExtraida(relatado, exercicio, numero, carga, cargaAproximada,
                 repeticoes, repeticoesAproximadas, falha, percepcao), idExercicio);
+    }
+
+    // Série do resumo do /desfazer (6c). nomeOficial só com id, como o SerieDAO devolve.
+    private static SerieResumida resumida(Long idExercicio, String nomeOficial, String relatado) {
+        return new SerieResumida(idExercicio, nomeOficial, relatado);
     }
 
     // --- Updates em JSON ----------------------------------------------------------------------
@@ -1109,10 +1375,12 @@ public class TelegramSpike {
         // grava e aprova neste mesmo mapa, que a busca do remetente lê.
         final Map<Long, Usuario> usuarios = new HashMap<>();
         final CadastroFalso cadastro = new CadastroFalso(usuarios);
+        final CorretorFalso corretor = new CorretorFalso();
         final List<Duration> esperas = new ArrayList<>();
         final List<String> log = new ArrayList<>();
         SQLException erroNaBusca;
-        final LoopTelegram loop;
+        // Não é final só por causa do reiniciar() (6c).
+        LoopTelegram loop;
 
         Cenario() {
             LocalDateTime dataCadastro = LocalDateTime.of(2026, 10, 8, 20, 0);
@@ -1124,12 +1392,24 @@ public class TelegramSpike {
                     dataCadastro));
             usuarios.put(ID_TELEGRAM_BLOQUEADO, new Usuario(ID_USUARIO_BLOQUEADO, ID_TELEGRAM_BLOQUEADO,
                     NOME_BLOQUEADO, "BLOQUEADO", dataCadastro));
-            loop = new LoopTelegram(telegram, registrador, this::buscar, cadastro, ID_TELEGRAM_ADMIN, esperas::add,
-                    Clock.fixed(AGORA, SAO_PAULO), linha -> {
+            loop = novoLoop();
+        }
+
+        private LoopTelegram novoLoop() {
+            return new LoopTelegram(telegram, registrador, this::buscar, cadastro, corretor, ID_TELEGRAM_ADMIN,
+                    esperas::add, Clock.fixed(AGORA, SAO_PAULO), linha -> {
                         log.add(linha);
                         LOG_GERAL.add(linha);
                         System.out.println("        log: " + linha);
                     });
+        }
+
+        // O bot caiu e subiu de novo (6c, reentrega): loop novo, com o offset de
+        // volta a 0 (ele vive só em memória), sobre os MESMOS falsos. O Telegram
+        // falso ainda tem os updates, e o "banco" (cadastro, corretor) lembra o que
+        // já foi feito, como os de verdade.
+        void reiniciar() {
+            loop = novoLoop();
         }
 
         Optional<Usuario> buscar(long idTelegram) throws SQLException {
@@ -1145,9 +1425,11 @@ public class TelegramSpike {
             return usuario == null ? null : usuario.status();
         }
 
-        // Nem cadastro, nem aprovação, nem registro (TR_MENSAGEM) foram chamados.
+        // Nem cadastro, nem aprovação, nem registro (TR_MENSAGEM), nem /desfazer
+        // (6c) foram chamados.
         boolean nadaGravado() {
-            return cadastro.cadastros == 0 && cadastro.aprovacoes == 0 && registrador.chamadas == 0;
+            return cadastro.cadastros == 0 && cadastro.aprovacoes == 0 && registrador.chamadas == 0
+                    && corretor.chamadas == 0;
         }
 
         // Volta a volta até o Telegram falso não ter mais nada para entregar.
@@ -1324,6 +1606,64 @@ public class TelegramSpike {
             usuarios.put(usuario.idTelegram(), new Usuario(usuario.idUsuario(), usuario.idTelegram(), usuario.nome(),
                     "ATIVO", usuario.dataCadastro()));
             return ResultadoAprovacao.aprovado(usuario.nome(), usuario.idTelegram());
+        }
+    }
+
+    /**
+     * Correção em memória (6c): guarda os argumentos e devolve (ou lança) o que o
+     * cenário mandou. Sem resposta programada, falha alto: o cenário não esperava
+     * que ele fosse chamado.
+     *
+     * Imita a idempotência do CorrecaoService (como o CadastroFalso imita as
+     * regras do /aprovar): o comando (usuário + message_id) que já DESFEZ algo
+     * devolve JA_APLICADO, sem consumir resposta e sem "marcar" de novo. Falha
+     * programada (SQLException) não conta como aplicada: no service, foi rollback.
+     * As regras de verdade (alvo, janela de 24 h, pilha, UPDATE, índice) são
+     * conferidas pelo DesfazerSpike, no banco.
+     */
+    private static final class CorretorFalso implements Corretor {
+
+        @FunctionalInterface
+        interface Resposta {
+            ResultadoDesfazer dar() throws SQLException;
+        }
+
+        // O DESFEITA_POR_ID_TELEGRAM do falso: por usuário, como no banco.
+        private record Comando(long idUsuario, long idTelegram) {
+        }
+
+        final Deque<Resposta> respostas = new ArrayDeque<>();
+        private final Set<Comando> aplicados = new HashSet<>();
+        int chamadas = 0;
+        // Quantas vezes o falso "fez o UPDATE" (devolveu DESFEITO).
+        int marcacoes = 0;
+        final List<Long> idsUsuario = new ArrayList<>();
+        long idUsuario;
+        long idTelegramDoComando;
+        LocalDateTime envio;
+
+        @Override
+        public ResultadoDesfazer desfazerUltima(long idUsuario, long idTelegramDoComando,
+                LocalDateTime envioDoComando) throws SQLException {
+            chamadas++;
+            idsUsuario.add(idUsuario);
+            this.idUsuario = idUsuario;
+            this.idTelegramDoComando = idTelegramDoComando;
+            this.envio = envioDoComando;
+            Comando comando = new Comando(idUsuario, idTelegramDoComando);
+            if (aplicados.contains(comando)) {
+                return ResultadoDesfazer.jaAplicado();
+            }
+            Resposta resposta = respostas.poll();
+            if (resposta == null) {
+                throw new IllegalStateException("desfazerUltima chamado sem resposta programada");
+            }
+            ResultadoDesfazer resultado = resposta.dar();
+            if (resultado.situacao() == ResultadoDesfazer.Situacao.DESFEITO) {
+                aplicados.add(comando);
+                marcacoes++;
+            }
+            return resultado;
         }
     }
 }

@@ -1,7 +1,7 @@
 package dev.vitorrodrigues.treino.bot;
 
 /**
- * Todas as frases que o usuário lê no chat, num lugar só (fatias 6a e 6b).
+ * Todas as frases que o usuário lê no chat, num lugar só (fatias 6a, 6b e 6c).
  *
  * Todas PROVISÓRIAS: o Vitor reescreve antes do teste com amigos (o texto que
  * vai para os amigos não se delega). Com elas aqui, reescrever é editar um
@@ -23,9 +23,10 @@ public final class Textos {
 
     // --- Filtros (seção 1) ---------------------------------------------------------
 
-    // PROVISÓRIO
+    // PROVISÓRIO. Desde a 6c, orienta para o /desfazer: uma mensagem nova com a
+    // correção ACRESCENTARIA séries, não corrigiria.
     public static final String EDICAO_IGNORADA =
-            "Edições não mudam o registro. Mande uma mensagem nova com a correção.";
+            "Edições não mudam o registro. Para corrigir, mande /desfazer e envie o relato de novo.";
 
     // PROVISÓRIO
     public static final String SO_ENTENDO_TEXTO = "Por enquanto só entendo texto.";
@@ -80,6 +81,10 @@ public final class Textos {
     // PROVISÓRIO
     public static final String SEM_FALHA = "(sem falha)";
 
+    // PROVISÓRIO. Última linha da confirmação, só no REGISTRADO (fatia 6c): é
+    // onde o usuário confere o que o bot entendeu e descobre como corrigir.
+    public static final String DICA_DESFAZER = "Algo errado? Mande /desfazer e envie de novo.";
+
     // --- Cadastro (fatia 6b) -------------------------------------------------------------
 
     // PROVISÓRIO. Resposta ao /start de quem ainda não está cadastrado.
@@ -129,4 +134,33 @@ public final class Textos {
 
     // PROVISÓRIO. Vai para o chat de quem foi aprovado.
     public static final String ACESSO_LIBERADO = "Seu acesso foi liberado. Pode mandar seu treino.";
+
+    // --- /desfazer (fatia 6c) -------------------------------------------------------------
+
+    // PROVISÓRIO. Cabeçalho da resposta. %s = data da SESSÃO da mensagem desfeita (dd/MM/yyyy).
+    public static final String DESFEITO_REGISTRO_DE = "Desfeito: registro de %s";
+
+    // PROVISÓRIO. Exercício fora do catálogo no resumo. %s = exercicio_relatado.
+    public static final String DESFEITO_NAO_RECONHECIDO = "não reconhecido: \"%s\"";
+
+    // PROVISÓRIO. Contagem de um exercício que teve uma série só.
+    public static final String UMA_SERIE = "(1 série)";
+
+    // PROVISÓRIO. Contagem de um exercício com 2 séries ou mais. %d = número de séries.
+    public static final String VARIAS_SERIES = "(%d séries)";
+
+    // PROVISÓRIO. A mensagem desfeita só tinha observação do dia.
+    public static final String DESFEITO_SEM_SERIES = "(sem séries)";
+
+    // PROVISÓRIO. Sai sempre que a sessão tiver observação: ela fica.
+    public static final String OBSERVACAO_NAO_DESFEITA = "A observação do dia não é desfeita.";
+
+    // PROVISÓRIO
+    public static final String NADA_PARA_DESFAZER = "Nada para desfazer nas últimas 24 h.";
+
+    // PROVISÓRIO. Recusa do banco ou desistência (teto de tentativas) no
+    // /desfazer. Nos dois casos o service não comitou nada: o registro continua
+    // como estava.
+    public static final String NAO_CONSEGUI_DESFAZER =
+            "Não consegui desfazer agora; seu registro continua como estava. Tente /desfazer de novo mais tarde.";
 }

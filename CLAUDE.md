@@ -1,7 +1,6 @@
 # CLAUDE.md — Assistente de Treino IA
 
 Antes de qualquer tarefa, leia `docs/escopo-mvp.md` (regras de negócio, decisões, o que está fora do MVP).
-`progresso.md` mostra onde o projeto parou.
 
 ## Divisão de trabalho (regra do projeto, revista em 08/10/2026)
 - Até o teste com amigos, **você escreve as fatias 1–9** (scripts SQL, DAOs, services, clientes HTTP,

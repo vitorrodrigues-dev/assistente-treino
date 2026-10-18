@@ -1,7 +1,12 @@
 -- =============================================================================
--- Testes das regras do MVP (rodar DEPOIS do 04-usuario.sql, como script: F5).
+-- Testes das regras do MVP (rodar DEPOIS do 05-desfazer.sql, como script: F5).
+-- Desde a fatia 6c, depende do 05-desfazer.sql (R12 a R15 e P6 usam as colunas
+-- DATA_HORA_DESFEITA e DESFEITA_POR_ID_TELEGRAM); sem ele, todos dão ORA-00904
+-- (coluna inexistente): os R "passariam" pelo motivo errado e o P6 falharia.
 -- Derivados das REGRAS do escopo-mvp.md.
--- Esperado: 11 erros (testes R1-R11) e 5 sucessos (testes P1-P5).
+-- Esperado: 15 erros (testes R1-R15) e 6 sucessos (testes P1-P6).
+-- Atenção à ordem: o R15 fica DEPOIS do P6 (precisa de uma mensagem que o P6
+-- desfez).
 -- O arquivo termina com ROLLBACK: nada fica gravado no banco.
 -- Valores de teste usam ID_TELEGRAM 999000xxx e nomes "TESTE ..." para não
 -- colidir com dados reais.
@@ -169,6 +174,68 @@ VALUES (999000002,
 
 
 -- -----------------------------------------------------------------------------
+-- R12. Regra (6c): só pode ser desfeita mensagem que gerou registro (tem sessão).
+-- Mensagem SEM sessão (como um SEM_SERIES ou NAO_REGISTRADO) marcada como
+-- desfeita, com as DUAS colunas preenchidas: assim a única condição que falha é
+-- a da sessão (e não a das "duas juntas", que é o R13/R14).
+-- Todas as colunas NOT NULL preenchidas e ID_TELEGRAM novo (999000003), para
+-- que o erro não seja o NOT NULL nem o UNIQUE.
+-- Esperado: ORA-02290 check constraint (CK_TR_MENSAGEM_DESFEITA) violated
+-- -----------------------------------------------------------------------------
+INSERT INTO TR_MENSAGEM (ID_TELEGRAM, DATA_HORA_ENVIO, ORIGEM, TEXTO_BRUTO, ID_SESSAO,
+                         ID_USUARIO, DATA_HORA_DESFEITA, DESFEITA_POR_ID_TELEGRAM)
+VALUES (999000003,
+        TO_DATE('2026-10-07 18:40:00', 'YYYY-MM-DD HH24:MI:SS'),
+        'TEXTO',
+        'mensagem sem sessão marcada como desfeita',
+        NULL,
+        (SELECT ID_USUARIO FROM TR_USUARIO WHERE ID_TELEGRAM = 999000101),
+        TO_DATE('2026-10-07 18:45:00', 'YYYY-MM-DD HH24:MI:SS'),
+        999000900);
+
+
+-- -----------------------------------------------------------------------------
+-- R13. Regra (6c): data e comando do /desfazer andam juntos. Mensagem COM
+-- sessão, data preenchida, mas sem DESFEITA_POR_ID_TELEGRAM: a checagem de
+-- reentrega não enxergaria esta mensagem.
+-- ID_TELEGRAM novo (999000004).
+-- Esperado: ORA-02290 check constraint (CK_TR_MENSAGEM_DESFEITA) violated
+-- -----------------------------------------------------------------------------
+INSERT INTO TR_MENSAGEM (ID_TELEGRAM, DATA_HORA_ENVIO, ORIGEM, TEXTO_BRUTO, ID_SESSAO,
+                         ID_USUARIO, DATA_HORA_DESFEITA, DESFEITA_POR_ID_TELEGRAM)
+VALUES (999000004,
+        TO_DATE('2026-10-07 18:50:00', 'YYYY-MM-DD HH24:MI:SS'),
+        'TEXTO',
+        'mensagem desfeita sem o comando',
+        (SELECT MAX(ID_SESSAO) FROM TR_SESSAO
+          WHERE DATA_SESSAO = DATE '2026-10-07'
+            AND ID_USUARIO = (SELECT ID_USUARIO FROM TR_USUARIO WHERE ID_TELEGRAM = 999000101)),
+        (SELECT ID_USUARIO FROM TR_USUARIO WHERE ID_TELEGRAM = 999000101),
+        TO_DATE('2026-10-07 18:55:00', 'YYYY-MM-DD HH24:MI:SS'),
+        NULL);
+
+
+-- -----------------------------------------------------------------------------
+-- R14. Regra (6c): o outro lado do R13. Mensagem COM sessão, comando preenchido,
+-- mas sem a data: "meio desfeita".
+-- ID_TELEGRAM novo (999000005).
+-- Esperado: ORA-02290 check constraint (CK_TR_MENSAGEM_DESFEITA) violated
+-- -----------------------------------------------------------------------------
+INSERT INTO TR_MENSAGEM (ID_TELEGRAM, DATA_HORA_ENVIO, ORIGEM, TEXTO_BRUTO, ID_SESSAO,
+                         ID_USUARIO, DATA_HORA_DESFEITA, DESFEITA_POR_ID_TELEGRAM)
+VALUES (999000005,
+        TO_DATE('2026-10-07 18:52:00', 'YYYY-MM-DD HH24:MI:SS'),
+        'TEXTO',
+        'mensagem com o comando e sem a data',
+        (SELECT MAX(ID_SESSAO) FROM TR_SESSAO
+          WHERE DATA_SESSAO = DATE '2026-10-07'
+            AND ID_USUARIO = (SELECT ID_USUARIO FROM TR_USUARIO WHERE ID_TELEGRAM = 999000101)),
+        (SELECT ID_USUARIO FROM TR_USUARIO WHERE ID_TELEGRAM = 999000101),
+        NULL,
+        999000900);
+
+
+-- -----------------------------------------------------------------------------
 -- P1. Regras: exercício oficial vazio até confirmar; "não contei" = repetições
 -- NULL; carga não dita = NULL; falha não dita = NULL. Nada vira 0.
 -- Esperado: 1 linha inserida.
@@ -214,9 +281,11 @@ VALUES ('teste supino',
 -- P5. Regra: gravação idempotente é POR USUÁRIO. O message_id do Telegram só
 -- é único dentro de cada chat: a mensagem 999000001 do usuário B é outra
 -- mensagem, diferente da 999000001 do usuário A.
--- FICA POR ÚLTIMO: depois dele há duas mensagens 999000001, e as subconsultas
+-- FICA DEPOIS DE TODOS OS TESTES QUE BUSCAM A MENSAGEM SÓ PELO ID_TELEGRAM:
+-- depois dele há duas mensagens 999000001, e as subconsultas
 -- "WHERE ID_TELEGRAM = 999000001" dos testes acima deixariam de achar uma só
--- linha (ORA-01427).
+-- linha (ORA-01427). (O P6 e o R15, que vêm depois, filtram também pelo
+-- usuário.)
 -- Esperado: 1 linha inserida.
 -- -----------------------------------------------------------------------------
 INSERT INTO TR_MENSAGEM (ID_TELEGRAM, DATA_HORA_ENVIO, ORIGEM, TEXTO_BRUTO, ID_USUARIO)
@@ -225,6 +294,45 @@ VALUES (999000001,
         'TEXTO',
         'mensagem do usuário B com o mesmo message_id',
         (SELECT ID_USUARIO FROM TR_USUARIO WHERE ID_TELEGRAM = 999000102));
+
+
+-- -----------------------------------------------------------------------------
+-- P6. Regra (6c): mensagem que gerou registro (tem sessão) pode ser desfeita.
+-- É o que o /desfazer faz: um UPDATE que só marca, sem apagar nada, com as duas
+-- colunas juntas (quando e por qual comando: o /desfazer 999000901).
+-- A mensagem 999000001 do usuário A tem sessão (ver PREPARAÇÃO). O filtro pelo
+-- usuário é obrigatório aqui: depois do P5, o B também tem uma 999000001.
+-- Esperado: 1 linha atualizada.
+-- -----------------------------------------------------------------------------
+UPDATE TR_MENSAGEM
+   SET DATA_HORA_DESFEITA = TO_DATE('2026-10-07 19:10:00', 'YYYY-MM-DD HH24:MI:SS'),
+       DESFEITA_POR_ID_TELEGRAM = 999000901
+ WHERE ID_TELEGRAM = 999000001
+   AND ID_USUARIO = (SELECT ID_USUARIO FROM TR_USUARIO WHERE ID_TELEGRAM = 999000101);
+
+
+-- -----------------------------------------------------------------------------
+-- R15. Regra (6c): um mesmo /desfazer desfaz no máximo UMA mensagem do usuário
+-- (reentrega do Telegram não desfaz mais uma). O /desfazer 999000901 já desfez a
+-- mensagem 999000001 do usuário A (P6); outra mensagem do A, com sessão,
+-- desfeita pelo MESMO comando. A CK passa (as duas colunas e a sessão estão
+-- preenchidas): quem recusa é o índice.
+-- FICA DEPOIS DO P6, que cria a primeira mensagem desfeita por esse comando.
+-- ID_TELEGRAM novo (999000006).
+-- Esperado: ORA-00001 unique constraint (UQ_TR_MENSAGEM_DESFEITA_POR) violated
+-- -----------------------------------------------------------------------------
+INSERT INTO TR_MENSAGEM (ID_TELEGRAM, DATA_HORA_ENVIO, ORIGEM, TEXTO_BRUTO, ID_SESSAO,
+                         ID_USUARIO, DATA_HORA_DESFEITA, DESFEITA_POR_ID_TELEGRAM)
+VALUES (999000006,
+        TO_DATE('2026-10-07 19:05:00', 'YYYY-MM-DD HH24:MI:SS'),
+        'TEXTO',
+        'segunda mensagem desfeita pelo mesmo comando',
+        (SELECT MAX(ID_SESSAO) FROM TR_SESSAO
+          WHERE DATA_SESSAO = DATE '2026-10-07'
+            AND ID_USUARIO = (SELECT ID_USUARIO FROM TR_USUARIO WHERE ID_TELEGRAM = 999000101)),
+        (SELECT ID_USUARIO FROM TR_USUARIO WHERE ID_TELEGRAM = 999000101),
+        TO_DATE('2026-10-07 19:10:00', 'YYYY-MM-DD HH24:MI:SS'),
+        999000901);
 
 
 -- -----------------------------------------------------------------------------
