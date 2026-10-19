@@ -38,6 +38,7 @@ import dev.vitorrodrigues.treino.modelo.ResultadoRegistro.TipoFalha;
 import dev.vitorrodrigues.treino.modelo.SerieResumida;
 import dev.vitorrodrigues.treino.modelo.Usuario;
 import dev.vitorrodrigues.treino.service.Cadastrador;
+import dev.vitorrodrigues.treino.service.Consultor;
 import dev.vitorrodrigues.treino.service.Corretor;
 import dev.vitorrodrigues.treino.service.Registrador;
 import tools.jackson.databind.JsonNode;
@@ -1396,8 +1397,13 @@ public class TelegramSpike {
         }
 
         private LoopTelegram novoLoop() {
-            return new LoopTelegram(telegram, registrador, this::buscar, cadastro, corretor, ID_TELEGRAM_ADMIN,
-                    esperas::add, Clock.fixed(AGORA, SAO_PAULO), linha -> {
+            // Fatia 7: o loop passou a receber o Consultor. Nenhum cenário daqui manda
+            // /carga (os dele estão no ConsultaSpike): se chegar a ser chamado, falha alto.
+            Consultor consultor = (idUsuario, idTelegram, envio, texto, argumento) -> {
+                throw new IllegalStateException("consultarCarga chamado no TelegramSpike");
+            };
+            return new LoopTelegram(telegram, registrador, this::buscar, cadastro, corretor, consultor,
+                    ID_TELEGRAM_ADMIN, esperas::add, Clock.fixed(AGORA, SAO_PAULO), linha -> {
                         log.add(linha);
                         LOG_GERAL.add(linha);
                         System.out.println("        log: " + linha);

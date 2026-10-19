@@ -10,14 +10,17 @@ import java.util.Map;
 import java.util.Objects;
 
 import dev.vitorrodrigues.treino.extrator.SerieExtraida;
+import dev.vitorrodrigues.treino.modelo.ResultadoConsulta;
 import dev.vitorrodrigues.treino.modelo.ResultadoDesfazer;
 import dev.vitorrodrigues.treino.modelo.ResultadoRegistro;
 import dev.vitorrodrigues.treino.modelo.ResultadoRegistro.SerieGravada;
+import dev.vitorrodrigues.treino.modelo.SerieConsultada;
 import dev.vitorrodrigues.treino.modelo.SerieResumida;
 
 /**
  * ResultadoRegistro -> texto da resposta no chat (seções 4 e 5 da fatia 6a).
  * Fatia 6c: ResultadoDesfazer -> resposta do /desfazer.
+ * Fatia 7: ResultadoConsulta -> resposta do /carga.
  *
  * A confirmação é montada SÓ com os campos estruturados (números, booleanos, nome
  * do catálogo), nunca com o texto que o usuário mandou. Exceções: o
@@ -38,6 +41,7 @@ final class Respostas {
     private static final String KG = " kg";
     private static final String RECUO = "  ";
     private static final String MARCADOR_DUVIDA = "- ";
+    private static final String MARCADOR_CANDIDATO = "- ";
 
     private Respostas() {
     }
@@ -125,16 +129,25 @@ final class Respostas {
 
     // "1ª: ~22,5 kg × 10 (falha)". Percepção não aparece (seção 4).
     private static String linha(SerieExtraida serie) {
+        return linha(serie.numeroSerie(), serie.cargaKg(), serie.cargaAproximada(), serie.repeticoes(),
+                serie.repeticoesAproximadas(), serie.falha());
+    }
+
+    // A linha de uma série, campo a campo: a confirmação do registro (6a) e a
+    // resposta do /carga (fatia 7) usam esta mesma, para o número sair igual nas
+    // duas ("22,5 kg", "—", "~").
+    private static String linha(Integer numeroSerie, Double kg, Boolean cargaAproximada, Integer repeticoes,
+            Boolean repeticoesAproximadas, Boolean falha) {
         StringBuilder linha = new StringBuilder();
-        linha.append(serie.numeroSerie()).append(ORDINAL).append(": ")
-                .append(carga(serie.cargaKg(), serie.cargaAproximada()))
+        linha.append(numeroSerie).append(ORDINAL).append(": ")
+                .append(carga(kg, cargaAproximada))
                 .append(VEZES)
-                .append(repeticoes(serie.repeticoes(), serie.repeticoesAproximadas()));
+                .append(repeticoes(repeticoes, repeticoesAproximadas));
         // Três estados: true, false e null (não foi dito). null não mostra nada:
         // mostrar "(sem falha)" seria afirmar o que o usuário não disse.
-        if (Boolean.TRUE.equals(serie.falha())) {
+        if (Boolean.TRUE.equals(falha)) {
             linha.append(' ').append(Textos.FALHA);
-        } else if (Boolean.FALSE.equals(serie.falha())) {
+        } else if (Boolean.FALSE.equals(falha)) {
             linha.append(' ').append(Textos.SEM_FALHA);
         }
         return linha.toString();
@@ -267,5 +280,66 @@ final class Respostas {
 
     private static String quantidade(int series) {
         return series == 1 ? Textos.UMA_SERIE : Textos.VARIAS_SERIES.formatted(series);
+    }
+
+    // --- /carga (fatia 7) ----------------------------------------------------------------
+
+    /**
+     * Resposta do /carga.
+     *
+     * @return o texto, ou null (silêncio) só no JA_GRAVADA
+     */
+    static String para(ResultadoConsulta resultado) {
+        return switch (resultado.situacao()) {
+            // Silêncio, como no JA_GRAVADA do registro: é a reentrega de uma
+            // consulta já respondida (ou cuja resposta se perdeu na queda).
+            case JA_GRAVADA -> null;
+            case AJUDA -> Textos.CARGA_AJUDA;
+            case NAO_ENCONTRADO -> Textos.CARGA_NAO_ENCONTREI;
+            case AMBIGUO -> candidatos(resultado);
+            case SEM_REGISTRO -> Textos.CARGA_SEM_REGISTRO.formatted(resultado.nomeOficial());
+            case ENCONTRADO -> ultimoTreino(resultado);
+            case ERRO -> Textos.NAO_CONSEGUI_CONSULTAR;
+        };
+    }
+
+    // Cabeçalho (nome oficial, forma da carga, data) e uma linha por série, com o
+    // mesmo recuo e a mesma linha da confirmação. Data sempre explícita: "último
+    // treino" sem data não diz se foi ontem ou mês passado. Percepção e observação
+    // do dia não aparecem (nem são lidas).
+    private static String ultimoTreino(ResultadoConsulta resultado) {
+        List<String> linhas = new ArrayList<>();
+        linhas.add(Textos.CARGA_ULTIMO_TREINO.formatted(resultado.nomeOficial(),
+                formaCarga(resultado.formaCarga()), resultado.dataTreino().format(FORMATO_DATA)));
+        for (SerieConsultada serie : resultado.series()) {
+            linhas.add(RECUO + linha(serie.numeroSerie(), serie.cargaKg(), serie.cargaAproximada(),
+                    serie.repeticoes(), serie.repeticoesAproximadas(), serie.falha()));
+        }
+        return String.join("\n", linhas);
+    }
+
+    // Código do catálogo -> texto do cabeçalho. Valor fora do
+    // CK_TR_EXERCICIO_FORMA_CARGA falha alto (cai no erro inesperado do loop) em vez
+    // de sair um cabeçalho sem a forma da carga.
+    private static String formaCarga(String codigo) {
+        return switch (codigo) {
+            case "POR_LADO" -> Textos.CARGA_POR_LADO;
+            case "TOTAL" -> Textos.CARGA_TOTAL;
+            default -> throw new IllegalStateException("FORMA_CARGA fora do CK_TR_EXERCICIO_FORMA_CARGA.");
+        };
+    }
+
+    // Os nomes oficiais, um por linha, na ordem do catálogo; o aviso de "seja mais
+    // específico" só quando os listados não são todos.
+    private static String candidatos(ResultadoConsulta resultado) {
+        List<String> linhas = new ArrayList<>();
+        linhas.add(Textos.CARGA_QUAL_DELES);
+        for (String nome : resultado.candidatos()) {
+            linhas.add(MARCADOR_CANDIDATO + nome);
+        }
+        if (resultado.haMaisCandidatos()) {
+            linhas.add(Textos.CARGA_SEJA_MAIS_ESPECIFICO);
+        }
+        return String.join("\n", linhas);
     }
 }

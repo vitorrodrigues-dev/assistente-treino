@@ -21,10 +21,12 @@ import java.util.function.Consumer;
 import java.util.regex.Pattern;
 
 import dev.vitorrodrigues.treino.modelo.ResultadoAprovacao;
+import dev.vitorrodrigues.treino.modelo.ResultadoConsulta;
 import dev.vitorrodrigues.treino.modelo.ResultadoDesfazer;
 import dev.vitorrodrigues.treino.modelo.ResultadoRegistro;
 import dev.vitorrodrigues.treino.modelo.Usuario;
 import dev.vitorrodrigues.treino.service.Cadastrador;
+import dev.vitorrodrigues.treino.service.Consultor;
 import dev.vitorrodrigues.treino.service.Corretor;
 import dev.vitorrodrigues.treino.service.Registrador;
 import tools.jackson.databind.JsonNode;
@@ -35,6 +37,8 @@ import tools.jackson.databind.JsonNode;
  * e /aprovar do administrador.
  * Fatia 6c: /desfazer, que marca como desfeita a última mensagem registrada de
  * quem manda (exclusão lógica: nada é apagado).
+ * Fatia 7: /carga <exercício>, que responde com as séries do último treino daquele
+ * exercício. Sem LLM: o /carga nunca chega ao Registrador (nem ao extrator).
  *
  * REGRA CENTRAL DO OFFSET. O offset diz ao Telegram "até aqui já processei"; o
  * que fica antes dele o Telegram apaga. Então o offset só avança quando a
@@ -46,12 +50,14 @@ import tools.jackson.databind.JsonNode;
  * paralelo, a mesma data poderia ganhar duas sessões).
  *
  * Todas as dependências chegam por interface (ClienteTelegram, Registrador,
- * BuscaUsuario, Cadastrador, Corretor, Espera), mais o relógio e a saída do log.
- * Assim o TelegramSpike exercita o loop inteiro sem celular, sem banco e sem rede.
+ * BuscaUsuario, Cadastrador, Corretor, Consultor, Espera), mais o relógio e a saída
+ * do log. Assim o TelegramSpike exercita o loop inteiro sem celular, sem banco e
+ * sem rede.
  *
  * LOG: uma linha por update. Nunca vai para o log: texto da mensagem, nome
- * (first_name), from.id, ID_USUARIO, ID_MENSAGEM, argumento do /aprovar, dúvidas,
- * resumo do /desfazer (nomes de exercício, texto relatado), token. Só
+ * (first_name), from.id, ID_USUARIO, ID_MENSAGEM, argumento do /aprovar e do
+ * /carga, dúvidas, resumo do /desfazer (nomes de exercício, texto relatado),
+ * resposta do /carga (nomes de exercício, cargas), token. Só
  * tipo, situação, motivo (que, por contrato, não tem texto do usuário), código
  * ORA, status HTTP e nome de classe. Nunca imprimir um Usuario: o toString() dele
  * tem nome e id.
@@ -113,11 +119,12 @@ public class LoopTelegram {
             Map.entry("contact", "contato"),
             Map.entry("poll", "enquete"));
 
-    // Comandos conhecidos (6b; /desfazer na 6c). Comparação exata, depois de tirar
-    // o "@nome_do_bot".
+    // Comandos conhecidos (6b; /desfazer na 6c; /carga na 7). Comparação exata,
+    // depois de tirar o "@nome_do_bot".
     private static final String START = "/start";
     private static final String APROVAR = "/aprovar";
     private static final String DESFAZER = "/desfazer";
+    private static final String CARGA = "/carga";
 
     private static final String PENDENTE = "PENDENTE";
 
@@ -135,6 +142,7 @@ public class LoopTelegram {
     private final BuscaUsuario usuarios;
     private final Cadastrador cadastro;
     private final Corretor corretor;
+    private final Consultor consultor;
     // TELEGRAM_CHAT_ID_PERMITIDO: o from.id do administrador. É também o chat id
     // do aviso de novo pedido: na conversa privada, chat id = from.id.
     private final long idAdministrador;
@@ -155,13 +163,14 @@ public class LoopTelegram {
     private int tentativasNoBanco = 0;
 
     public LoopTelegram(ClienteTelegram telegram, Registrador registrador, BuscaUsuario usuarios,
-            Cadastrador cadastro, Corretor corretor, long idAdministrador, Espera espera, Clock relogio,
-            Consumer<String> log) {
+            Cadastrador cadastro, Corretor corretor, Consultor consultor, long idAdministrador, Espera espera,
+            Clock relogio, Consumer<String> log) {
         this.telegram = Objects.requireNonNull(telegram, "telegram");
         this.registrador = Objects.requireNonNull(registrador, "registrador");
         this.usuarios = Objects.requireNonNull(usuarios, "usuarios");
         this.cadastro = Objects.requireNonNull(cadastro, "cadastro");
         this.corretor = Objects.requireNonNull(corretor, "corretor");
+        this.consultor = Objects.requireNonNull(consultor, "consultor");
         this.idAdministrador = idAdministrador;
         this.espera = Objects.requireNonNull(espera, "espera");
         this.relogio = Objects.requireNonNull(relogio, "relogio");
@@ -459,7 +468,8 @@ public class LoopTelegram {
 
     // Ponto único de roteamento dos comandos de quem está ATIVO (passo 7). O
     // PENDENTE nunca chega aqui (atenderPendente responde "aguardando aprovação" a
-    // qualquer comando, inclusive /desfazer), nem o BLOQUEADO ou o desconhecido.
+    // qualquer comando, inclusive /desfazer e /carga), nem o BLOQUEADO ou o
+    // desconhecido.
     private void tratarComando(Comando comando, long idTelegram, Usuario usuario, JsonNode mensagem,
             Atendimento atendimento) throws SQLException, InterruptedException {
         if (START.equals(comando.nome())) {
@@ -482,6 +492,10 @@ public class LoopTelegram {
         }
         if (DESFAZER.equals(comando.nome())) {
             desfazer(usuario, mensagem, atendimento);
+            return;
+        }
+        if (CARGA.equals(comando.nome())) {
+            consultarCarga(usuario, mensagem, comando.argumento(), atendimento);
             return;
         }
         atendimento.resultado = "ignorado: comando não reconhecido";
@@ -625,15 +639,52 @@ public class LoopTelegram {
         }
     }
 
+    // --- 7: /carga ----------------------------------------------------------------------
+
+    // /carga <exercício> de quem está ATIVO (fatia 7). O PENDENTE nunca chega aqui
+    // (recebe "aguardando aprovação", como qualquer comando), nem o BLOQUEADO ou o
+    // desconhecido: a política por status não muda.
+    private void consultarCarga(Usuario usuario, JsonNode mensagem, String argumento, Atendimento atendimento)
+            throws SQLException, InterruptedException {
+        // No log, "consulta" no lugar de "comando" (regra 8 da 7). Antes de chamar o
+        // service: se a T1 falhar, a linha de erro também sai como consulta.
+        atendimento.tipo = "consulta";
+        // Data de ENVIO (ver dataDeEnvio) e message_id: a mensagem crua é gravada como
+        // a de um relato, e o UNIQUE por (usuário, message_id) é o que faz a
+        // reentrega voltar como JA_GRAVADA.
+        LocalDateTime envio = dataDeEnvio(mensagem);
+        long idTelegram = inteiro(mensagem, "message_id");
+        // O texto inteiro ("/carga remada"), como veio: é o TEXTO_BRUTO. O passo 6
+        // já garantiu que existe e não está em branco.
+        String texto = texto(mensagem, "text");
+        // Recusa e desistência na T1: os textos padrão da 6a ("não consegui salvar
+        // essa mensagem"), porque é exatamente a mensagem que não foi salva.
+        atendimento.etapa = "ao gravar a consulta";
+        ResultadoConsulta resultado = consultor.consultarCarga(usuario.idUsuario(), idTelegram, envio, texto,
+                argumento);
+
+        // No log, só a situação e, no ERRO, o motivo (etapa + código ORA, por
+        // contrato). Nunca o argumento, o nome do exercício nem as cargas.
+        atendimento.resultado = resultado.situacao()
+                + (resultado.motivo() == null ? "" : ": " + resultado.motivo());
+        // null no JA_GRAVADA: silêncio (ver Respostas).
+        String resposta = Respostas.para(resultado);
+        if (resposta != null) {
+            responder(atendimento, resposta);
+        }
+    }
+
     // --- Seção 2: SQLException antes de a mensagem estar salva ------------------------
 
     // Vale para a busca do remetente, a T1 do registrar (depois da T1, o service
     // devolve NAO_REGISTRADO em vez de exceção), desde a 6b o cadastro do /start e o
-    // /aprovar e, desde a 6c, o /desfazer. Nos três últimos, nada foi comitado (o
-    // service desfez a transação): repetir o update é seguro.
+    // /aprovar, desde a 6c o /desfazer e, desde a 7, a T1 do /carga (depois dela, o
+    // service devolve ERRO em vez de exceção). No cadastro, no /aprovar e no
+    // /desfazer, nada foi comitado (o service desfez a transação): repetir o update
+    // é seguro.
     // A resposta de erro só sai se o bot já podia falar com o remetente (chatId):
     // na busca, não; no cadastro, sim (caminho do /start); no /aprovar, é o admin;
-    // no /desfazer, é um ATIVO.
+    // no /desfazer e no /carga, é um ATIVO.
     private Duration tratarErroNoBanco(SQLException e, long updateId, Atendimento atendimento)
             throws InterruptedException {
         String onde = atendimento.etapa;

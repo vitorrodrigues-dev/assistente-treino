@@ -1,7 +1,7 @@
 package dev.vitorrodrigues.treino.bot;
 
 /**
- * Todas as frases que o usuário lê no chat, num lugar só (fatias 6a, 6b e 6c).
+ * Todas as frases que o usuário lê no chat, num lugar só (fatias 6a, 6b, 6c e 7).
  *
  * Todas PROVISÓRIAS: o Vitor reescreve antes do teste com amigos (o texto que
  * vai para os amigos não se delega). Com elas aqui, reescrever é editar um
@@ -163,4 +163,36 @@ public final class Textos {
     // como estava.
     public static final String NAO_CONSEGUI_DESFAZER =
             "Não consegui desfazer agora; seu registro continua como estava. Tente /desfazer de novo mais tarde.";
+
+    // --- /carga (fatia 7) -----------------------------------------------------------------
+
+    // PROVISÓRIO. /carga sem argumento.
+    public static final String CARGA_AJUDA = String.join("\n",
+            "Para ver as séries do último treino de um exercício, mande /carga e o nome dele.",
+            "Exemplo: /carga remada unilateral máquina");
+
+    // PROVISÓRIO. Cabeçalho da resposta. %1$s = nome oficial, %2$s = CARGA_POR_LADO
+    // ou CARGA_TOTAL, %3$s = data do treino (dd/MM/yyyy).
+    public static final String CARGA_ULTIMO_TREINO = "%1$s (%2$s), último treino em %3$s:";
+
+    // PROVISÓRIO. Forma da carga no cabeçalho (TR_EXERCICIO.FORMA_CARGA = 'POR_LADO').
+    public static final String CARGA_POR_LADO = "carga por lado";
+
+    // PROVISÓRIO. Forma da carga no cabeçalho (TR_EXERCICIO.FORMA_CARGA = 'TOTAL').
+    public static final String CARGA_TOTAL = "carga total";
+
+    // PROVISÓRIO. %s = nome oficial.
+    public static final String CARGA_SEM_REGISTRO = "Ainda não há registro de %s.";
+
+    // PROVISÓRIO
+    public static final String CARGA_NAO_ENCONTREI = "Não encontrei esse exercício. Confira o nome e tente de novo.";
+
+    // PROVISÓRIO. Antes da lista de candidatos (nenhum é escolhido).
+    public static final String CARGA_QUAL_DELES = "Encontrei mais de um exercício. Mande /carga com o nome de um deles:";
+
+    // PROVISÓRIO. Depois da lista, quando os 10 listados não são todos.
+    public static final String CARGA_SEJA_MAIS_ESPECIFICO = "Há outros com esse nome; seja mais específico.";
+
+    // PROVISÓRIO. O banco falhou depois de a mensagem estar salva (ERRO).
+    public static final String NAO_CONSEGUI_CONSULTAR = "Não consegui consultar agora. Tente de novo.";
 }
